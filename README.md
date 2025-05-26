@@ -7,7 +7,7 @@ A 2D browser-based demonstration of Maxwell’s Demon operating on an ideal gas.
 
 ## Files
 
-* **index.html**: Entry point; loads the simulation canvas and UI.
+* **Maxwells_Demon.html**: Entry point; loads the simulation canvas and UI.
 * **style.css**: Basic styling for layout and controls.
 * **simulation.js**: Core physics engine (velocity sampling, collision handling, entropy & temperature calculations, demon logic).
 
@@ -28,7 +28,7 @@ A 2D browser-based demonstration of Maxwell’s Demon operating on an ideal gas.
 ### Usage
 
 1. Clone or download the repository.
-2. Open `index.html` in your browser.
+2. Open `MaxwellsDemon.html` in your browser.
 3. Use the on-screen controls to adjust temperature, toggle the demon mode, or reset the simulation.
 
 ## Physics Details
