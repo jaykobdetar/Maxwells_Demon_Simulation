@@ -46,7 +46,8 @@
                 </ul>
                 <h3>Thermal de Broglie Wavelength</h3>
                 <p>λ = h/√(2πmk<sub>B</sub>T) ≈ 16 pm for argon at 300K</p>
-                <p>This quantum length scale appears in the entropy calculation.</p>
+                <p>In simulation: λ ≈ 0.0016 pixels (properly scaled for accurate entropy)</p>
+                <p>This quantum length scale determines absolute entropy values via Sackur-Tetrode equation.</p>
             </div>
         </details>
         
@@ -179,6 +180,15 @@
                 <div class="stat-item">
                     <span class="stat-label" title="Total entropy change including system, information storage, and erasure costs. Must be ≥ 0 to satisfy Second Law.">Net Entropy Change</span>
                     <span class="stat-value"><span id="netEntropy">0</span> k<sub>B</sub></span>
+                    <details class="entropy-breakdown">
+                        <summary>Physics Breakdown</summary>
+                        <div class="breakdown-content">
+                            <div>Chamber ΔS: <span id="chamberEntropy">0</span> k<sub>B</sub></div>
+                            <div>Measurement cost: <span id="measurementEntropy">0</span> k<sub>B</sub></div>
+                            <div>Gate operations: <span id="gateOperationsEntropy">0</span> k<sub>B</sub></div>
+                            <div>Erasure cost: <span id="erasureEntropy">0</span> k<sub>B</sub></div>
+                        </div>
+                    </details>
                 </div>
                 <div class="stat-item">
                     <span class="stat-label" title="Probability of observing the current entropy decrease by thermal fluctuations alone: P = exp(-ΔS/k).">Fluctuation Probability</span>

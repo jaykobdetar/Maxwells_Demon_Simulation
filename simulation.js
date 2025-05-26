@@ -6,12 +6,21 @@ const T_REF = 300; // Reference temperature in Kelvin
 const MASS = 1.0; // Particle mass in normalized units
 
 // For entropy calculations, we need Planck's constant in our unit system
-// h² / (2πmk) has dimensions of length² × temperature
-// At T_REF = 300K, for argon atoms (m ≈ 6.6e-26 kg):
-// λ_thermal = h/√(2πmkT) ≈ 1.6e-11 m
-// In our normalized units where typical velocities are ~100 px/s
-// and k_B = 1, we set this constant to give physically meaningful entropy
-const H2_OVER_2PI_MK = 1e-6; // Normalized h²/(2πmk) to give proper entropy scale
+// Physical constants for argon at 300K:
+// h = 6.626e-34 J⋅s, m_Ar = 6.6e-26 kg, k_B = 1.38e-23 J/K
+// λ_thermal = h/√(2πmkT) ≈ 1.6e-11 m at 300K
+//
+// In our normalized units:
+// - Length: 1 pixel ≈ 10 nm (chamber width ~800px represents ~8μm)
+// - Velocity: 100 px/s = √(k_B⋅T_REF/m) for argon at 300K
+// - Energy: k_B⋅T_REF = 1 (normalized)
+//
+// Converting λ_thermal to pixel units: 1.6e-11 m / 10e-9 m/px = 0.0016 px
+// Therefore h²/(2πmk_B) in normalized units:
+const PIXEL_TO_METER = 10e-9; // 1 pixel = 10 nm
+const LAMBDA_THERMAL_METERS = 1.6e-11; // meters at 300K for argon
+const LAMBDA_THERMAL_PIXELS = LAMBDA_THERMAL_METERS / PIXEL_TO_METER;
+const H2_OVER_2PI_MK = LAMBDA_THERMAL_PIXELS * LAMBDA_THERMAL_PIXELS; // ≈ 2.56e-6 px²
 
 // Simulation constants
 const VELOCITY_SCALE = 100; // pixels per unit velocity
@@ -35,6 +44,54 @@ const PHASE_SPACE_X_OFFSET = 220;
 const PHASE_SPACE_Y_OFFSET = 170;
 const PHASE_SPACE_WIDTH = 200;
 const PHASE_SPACE_HEIGHT = 150;
+
+// Collision effect animation
+class CollisionEffect {
+    constructor(x, y, energy) {
+        this.x = x;
+        this.y = y;
+        this.radius = 0;
+        this.maxRadius = 10 + energy * 5;
+        this.opacity = 0.8;
+        this.color = energy > 1 ? `rgba(255, 150, 100, ` : `rgba(100, 150, 255, `;
+        this.lifetime = 0;
+        this.maxLifetime = 0.3; // seconds
+    }
+    
+    update(dt) {
+        this.lifetime += dt;
+        const progress = this.lifetime / this.maxLifetime;
+        
+        if (progress >= 1) {
+            return false; // Remove effect
+        }
+        
+        // Expand and fade
+        this.radius = this.maxRadius * Math.sin(progress * Math.PI);
+        this.opacity = 0.8 * (1 - progress);
+        
+        return true; // Keep effect
+    }
+    
+    render(ctx) {
+        ctx.save();
+        ctx.globalAlpha = this.opacity;
+        ctx.strokeStyle = this.color + this.opacity + ')';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        
+        // Inner glow
+        const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius);
+        gradient.addColorStop(0, this.color + (this.opacity * 0.3) + ')');
+        gradient.addColorStop(1, this.color + '0)');
+        ctx.fillStyle = gradient;
+        ctx.fill();
+        
+        ctx.restore();
+    }
+}
 
 // Demon memory management strategies
 class DemonMemory {
@@ -167,9 +224,10 @@ class DemonMemory {
         return totalBits;
     }
     
-    getErasureCost() {
+    getErasureCost(efficiencyFactor = 1.0) {
         // Each erasure costs ln(2) in normalized units
-        return this.erasureCount * Math.log(2);
+        // In realistic mode, multiply by efficiency factor (>1) for imperfect erasure
+        return this.erasureCount * Math.log(2) * efficiencyFactor;
     }
     
     getUtilization() {
@@ -266,10 +324,23 @@ class Particle {
     
     getColor(meanSpeed) {
         const speedRatio = this.speed / meanSpeed;
-        const hue = speedRatio > 1 ? 0 : 240;
-        const intensity = Math.min(speedRatio > 1 ? speedRatio - 1 : 1 - speedRatio, 1);
-        const lightness = 50 + intensity * 30;
-        return `hsl(${hue}, 100%, ${lightness}%)`;
+        const isFast = speedRatio > 1;
+        
+        if (isFast) {
+            // Fast particles: warm colors (red to yellow)
+            const intensity = Math.min((speedRatio - 1) * 2, 1);
+            const hue = 0 + intensity * 30; // Red to orange-yellow
+            const saturation = 100;
+            const lightness = 50 + intensity * 20;
+            return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+        } else {
+            // Slow particles: cool colors (blue to cyan)
+            const intensity = Math.min((1 - speedRatio) * 2, 1);
+            const hue = 220 - intensity * 20; // Blue to cyan
+            const saturation = 80 + intensity * 20;
+            const lightness = 40 + intensity * 20;
+            return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+        }
     }
 }
 
@@ -308,7 +379,8 @@ class Chamber {
         // Temperature in Kelvin
         const temperature = (totalKE / (this.particles.length * k_B)) * T_REF;
         
-        return temperature;
+        // Safeguard against unrealistic temperatures only
+        return Math.max(1, Math.min(10000, temperature)); // Much higher upper limit
     }
 }
 
@@ -318,6 +390,18 @@ class MaxwellDemonSimulation {
         this.ctx = canvas.getContext('2d');
         this.width = canvas.width;
         this.height = canvas.height;
+        
+        // Collision effects
+        this.collisionEffects = [];
+        this.maxCollisionEffects = 50;
+        
+        // Track recently measured particles to avoid double-counting
+        this.recentlyMeasured = new Set();
+        this.measurementCooldown = 0.1; // seconds before particle can be measured again
+        
+        // Track particles passing through gate
+        this.particlesPassedLeft = 0;
+        this.particlesPassedRight = 0;
         
         this.gateWidth = GATE_WIDTH;
         this.gateOpen = false;
@@ -348,10 +432,7 @@ class MaxwellDemonSimulation {
         this.informationBits = 0;
         this.lastDemonActive = true;
         
-        // For velocity distribution histogram
-        this.showHistogram = true;
-        this.histogramBins = HISTOGRAM_BINS;
-        this.maxHistogramSpeed = 0;
+        // Velocity histogram removed
         
         // Fluctuation tracking
         this.maxEntropyDecrease = 0;
@@ -359,12 +440,21 @@ class MaxwellDemonSimulation {
         
         // Phase space visualization
         this.showPhaseSpace = true;
+        this.phaseSpaceData = null;
+        this.lastPhaseSpaceUpdate = 0;
+        this.phaseSpaceUpdateInterval = 200; // Update every 200ms (less frequent)
         
         // Demon memory for realistic mode
         this.demonMode = 'perfect'; // 'perfect' or 'realistic'
         this.demonMemoryStrategy = 'fifo'; // Memory management strategy
         this.demonMemory = new DemonMemory(DEMON_MEMORY_LIMIT, this.demonMemoryStrategy);
         this.erasureCost = 0;
+        this.entropyBreakdown = {
+            chamber: 0,
+            measurement: 0,
+            erasure: 0,
+            total: 0
+        };
         
         // Data recording with circular buffer
         this.dataHistoryMaxSize = 5000; // Limit to prevent memory issues
@@ -391,6 +481,19 @@ class MaxwellDemonSimulation {
             targetFrameTime: 5 // ms, for 60 FPS with headroom
         };
         this.showPerformance = false;
+        
+        // Display smoothing and update control
+        this.displayUpdateInterval = 1000; // Update display every 1 second (less frequent)
+        this.lastDisplayUpdate = 0;
+        this.smoothedValues = {
+            leftTemp: 300,
+            rightTemp: 300,
+            entropyChange: 0,
+            measurementCost: 0,
+            netEntropy: 0,
+            efficiency: 0
+        };
+        this.smoothingFactor = 0.1; // Balanced smoothing
     }
     
     init(temperature, particleCount) {
@@ -480,16 +583,40 @@ class MaxwellDemonSimulation {
     }
     
     updateChambers() {
+        // Store previous chamber assignments
+        const prevLeftCount = this.leftChamber.particles.length;
+        const prevRightCount = this.rightChamber.particles.length;
+        
         this.leftChamber.particles = [];
         this.rightChamber.particles = [];
         
-        for (const particle of this.particles) {
-            if (this.leftChamber.containsPoint(particle.x, particle.y)) {
-                this.leftChamber.particles.push(particle);
-            } else if (this.rightChamber.containsPoint(particle.x, particle.y)) {
-                this.rightChamber.particles.push(particle);
+        if (this.gateOpen && !this.demonActive) {
+            // When gate is open and demon is off, treat as one chamber
+            // Assign particles to maintain roughly equal distribution for temperature calculation
+            const centerX = this.width / 2;
+            for (const particle of this.particles) {
+                if (particle.x < centerX) {
+                    this.leftChamber.particles.push(particle);
+                } else {
+                    this.rightChamber.particles.push(particle);
+                }
+            }
+        } else {
+            // Normal chamber assignment when demon is active or gate is closed
+            for (const particle of this.particles) {
+                if (this.leftChamber.containsPoint(particle.x, particle.y)) {
+                    this.leftChamber.particles.push(particle);
+                } else if (this.rightChamber.containsPoint(particle.x, particle.y)) {
+                    this.rightChamber.particles.push(particle);
+                }
+                // Particles in gate area are not assigned to either chamber when demon is active
             }
         }
+        
+        // Track changes in particle counts
+        const leftChange = this.leftChamber.particles.length - prevLeftCount;
+        const rightChange = this.rightChamber.particles.length - prevRightCount;
+        
     }
     
     checkDemonLogic() {
@@ -512,6 +639,13 @@ class MaxwellDemonSimulation {
         
         // Make gate decision
         const shouldOpen = this.makeGateDecision(predictions);
+        
+        // Record measurement only when making an actual gate decision
+        // Perfect demon only needs to know fast/slow for the particle at the gate
+        if (predictions.length > 0 && this.gateOpen !== shouldOpen) {
+            // Only record when we're changing the gate state based on a measurement
+            this.recordMeasurement(predictions[0]);
+        }
         
         // Track state changes and information
         if (this.gateOpen !== shouldOpen) {
@@ -537,7 +671,24 @@ class MaxwellDemonSimulation {
                 const timeToGate = distToGate / Math.abs(particle.vx);
                 
                 if (timeToGate < GATE_LOOK_AHEAD_TIME) {
-                    predictions.push(this.evaluateParticle(particle, timeToGate, theoreticalMeanSpeed));
+                    // Check if we've recently measured this particle
+                    const particleId = particle.x + '_' + particle.y; // Simple ID
+                    const measurementKey = particleId + '_' + Math.floor(Date.now() / (this.measurementCooldown * 1000));
+                    
+                    if (!this.recentlyMeasured.has(measurementKey)) {
+                        const evaluation = this.evaluateParticle(particle, timeToGate, theoreticalMeanSpeed);
+                        predictions.push(evaluation);
+                        
+                        
+                        // Don't record measurement yet - only record when gate decision is made
+                        // This prevents over-counting measurements
+                        this.recentlyMeasured.add(measurementKey);
+                        
+                        // Clean up old measurements periodically
+                        if (this.recentlyMeasured.size > 1000) {
+                            this.recentlyMeasured.clear();
+                        }
+                    }
                 }
             }
         }
@@ -574,9 +725,11 @@ class MaxwellDemonSimulation {
     makeGateDecision(predictions) {
         if (predictions.length === 0) return false;
         
-        // Open gate if the closest particle is desirable and very close
+        // Open gate if the closest particle is desirable and reasonably close
         const closest = predictions[0];
-        return closest.desirable && closest.timeToGate < 0.05;
+        // Increased threshold to make demon more responsive
+        const timeThreshold = this.demonMode === 'perfect' ? 0.1 : 0.08;
+        return closest.desirable && closest.timeToGate < timeThreshold;
     }
     
     handleGateStateChange(shouldOpen, predictions) {
@@ -595,8 +748,8 @@ class MaxwellDemonSimulation {
                 this.successfulSorts++;
             }
             
-            // Record measurement
-            this.recordMeasurement(predictions[0]);
+            // Note: Measurement already recorded in findApproachingParticles
+            // This ensures we account for ALL particles examined, not just sorted ones
             
             // Store for annotations
             if (this.showAnnotations) {
@@ -606,8 +759,10 @@ class MaxwellDemonSimulation {
     }
     
     recordMeasurement(prediction) {
-        // Each measurement costs 1 bit of information
-        this.informationBits += 1;
+        // Perfect demon: exactly 1 bit per measurement (fast/slow)
+        // Realistic demon: additional bits for speed value, position, etc.
+        const bitsPerMeasurement = this.demonMode === 'perfect' ? 1 : 3;
+        this.informationBits += bitsPerMeasurement;
         
         if (this.demonMode === 'realistic') {
             // Store measurement in finite memory using selected strategy
@@ -621,7 +776,9 @@ class MaxwellDemonSimulation {
             
             // Store and update erasure cost
             const storageCost = this.demonMemory.store(measurement);
-            this.erasureCost = this.demonMemory.getErasureCost();
+            // In realistic mode, erasure is inefficient (1.5x to 3x theoretical minimum)
+            const efficiencyFactor = 2.0; // 2x inefficiency for realistic demon
+            this.erasureCost = this.demonMemory.getErasureCost(efficiencyFactor);
         }
     }
     
@@ -673,9 +830,37 @@ class MaxwellDemonSimulation {
         const n_L = this.leftChamber.particles.length;
         const n_R = this.rightChamber.particles.length;
         
-        if (n_L === 0 || n_R === 0) return 0; // Avoid log(0)
+        // If all particles are in one chamber, use initial entropy as baseline
+        if (n_L === 0 || n_R === 0) return this.initialEntropy;
         
-        // Get temperatures
+        // When demon is OFF and gate is open, treat as single chamber for correct physics
+        if (this.gateOpen && !this.demonActive) {
+            // Calculate entropy as one unified system
+            const totalArea = this.width * this.height; // Full area
+            const avgTemp = this.calculateAverageTemperature();
+            const lambda2 = H2_OVER_2PI_MK * T_REF / avgTemp;
+            
+            const arg = totalArea / (N * lambda2);
+            if (arg > 0) {
+                const S_unified = N * (Math.log(arg) + 1);
+                const finalEntropy = k_B * S_unified;
+                
+                // Debug logging
+                if (this.frameCount % 300 === 0) { // Less frequent logging
+                    console.log('Unified chamber (demon OFF):');
+                    console.log('  N:', N, 'T_avg:', avgTemp.toFixed(1), 'K');
+                    console.log('  Total area:', totalArea);
+                    console.log('  lambda2:', lambda2.toExponential(3));
+                    console.log('  arg:', arg.toExponential(3));
+                    console.log('  S_unified:', S_unified.toFixed(3));
+                    console.log('  Final entropy:', finalEntropy.toFixed(3), 'k_B');
+                }
+                
+                return finalEntropy;
+            }
+        }
+        
+        // When demon is active, calculate as separate chambers
         const T_L = this.leftChamber.calculateTemperature();
         const T_R = this.rightChamber.calculateTemperature();
         
@@ -684,7 +869,6 @@ class MaxwellDemonSimulation {
         const A_R = this.rightChamber.width * this.rightChamber.height;
         
         // Calculate thermal de Broglie wavelength squared for each chamber
-        // λ² = h²/(2πmkT)
         const lambda2_L = H2_OVER_2PI_MK * T_REF / T_L;
         const lambda2_R = H2_OVER_2PI_MK * T_REF / T_R;
         
@@ -694,7 +878,8 @@ class MaxwellDemonSimulation {
         if (n_L > 0 && T_L > 0) {
             const arg_L = A_L / (n_L * lambda2_L);
             if (arg_L > 0) {
-                S_total += n_L * (Math.log(arg_L) + 1);
+                const S_L = n_L * (Math.log(arg_L) + 1);
+                S_total += S_L;
             }
         }
         
@@ -702,17 +887,41 @@ class MaxwellDemonSimulation {
         if (n_R > 0 && T_R > 0) {
             const arg_R = A_R / (n_R * lambda2_R);
             if (arg_R > 0) {
-                S_total += n_R * (Math.log(arg_R) + 1);
+                const S_R = n_R * (Math.log(arg_R) + 1);
+                S_total += S_R;
             }
         }
         
-        return k_B * S_total;
+        const finalEntropy = k_B * S_total;
+        
+        // Debug logging for separated chambers
+        if (this.frameCount % 300 === 0 && this.demonActive) {
+            console.log('Separated chambers (demon ON):');
+            console.log('  Left: n_L=', n_L, 'T_L=', T_L.toFixed(1), 'K');
+            console.log('  Right: n_R=', n_R, 'T_R=', T_R.toFixed(1), 'K');
+            console.log('  Final entropy:', finalEntropy.toFixed(3), 'k_B');
+        }
+        
+        return finalEntropy;
+    }
+    
+    calculateAverageTemperature() {
+        // Calculate average temperature of all particles
+        let totalKE = 0;
+        for (const particle of this.particles) {
+            const vx_norm = particle.vx / VELOCITY_SCALE;
+            const vy_norm = particle.vy / VELOCITY_SCALE;
+            const speedSquaredNorm = vx_norm * vx_norm + vy_norm * vy_norm;
+            totalKE += 0.5 * MASS * speedSquaredNorm;
+        }
+        return (totalKE / (this.particles.length * k_B)) * T_REF;
     }
     
     calculateEntropyChange() {
         // Calculate entropy change from initial state
         const currentEntropy = this.calculateEntropy();
         const entropyChange = currentEntropy - this.initialEntropy;
+        
         
         // Track maximum decrease
         const entropyDecrease = -entropyChange;
@@ -796,6 +1005,14 @@ class MaxwellDemonSimulation {
                     p1.vy = v2n * ny + v1t * nx;
                     p2.vx = v1n * nx - v2t * ny;
                     p2.vy = v1n * ny + v2t * nx;
+                    
+                    // Add collision effect
+                    const collisionX = (p1.x + p2.x) / 2;
+                    const collisionY = (p1.y + p2.y) / 2;
+                    const relativeSpeed = Math.sqrt(dvx * dvx + dvy * dvy) / VELOCITY_SCALE;
+                    if (this.collisionEffects.length < this.maxCollisionEffects) {
+                        this.collisionEffects.push(new CollisionEffect(collisionX, collisionY, relativeSpeed));
+                    }
                     
                     // Separate particles to prevent overlap
                     // Only separate if they're still overlapping after velocity update
@@ -926,6 +1143,14 @@ class MaxwellDemonSimulation {
             p2.vx = v1n * nx - v2t * ny;
             p2.vy = v1n * ny + v2t * nx;
             
+            // Add collision effect
+            const collisionX = (p1.x + p2.x) / 2;
+            const collisionY = (p1.y + p2.y) / 2;
+            const relativeSpeed = Math.sqrt(dvx * dvx + dvy * dvy) / VELOCITY_SCALE;
+            if (this.collisionEffects.length < this.maxCollisionEffects) {
+                this.collisionEffects.push(new CollisionEffect(collisionX, collisionY, relativeSpeed));
+            }
+            
             // Separate particles
             const newDx = p2.x - p1.x;
             const newDy = p2.y - p1.y;
@@ -970,8 +1195,13 @@ class MaxwellDemonSimulation {
             this.checkWallCollisions(particle);
         }
         
-        // Check particle-particle collisions
-        this.checkParticleCollisions();
+        // Check particle-particle collisions (optimize by checking every other frame)
+        if (this.frameCount % 2 === 0) {
+            this.checkParticleCollisions();
+        }
+        
+        // Update collision effects
+        this.collisionEffects = this.collisionEffects.filter(effect => effect.update(dt));
         
         this.updateChambers();
     }
@@ -984,29 +1214,80 @@ class MaxwellDemonSimulation {
     }
     
     updateDisplays() {
+        const currentTime = Date.now();
+        const shouldUpdateDisplay = (currentTime - this.lastDisplayUpdate) > this.displayUpdateInterval;
         
-        const leftTemp = Math.round(this.leftChamber.calculateTemperature());
-        const rightTemp = Math.round(this.rightChamber.calculateTemperature());
-        const tempDiff = Math.abs(leftTemp - rightTemp);
+        // Calculate current values based on demon state
+        let leftTemp, rightTemp;
         
-        // Update displays
-        document.getElementById('tempLeft').textContent = leftTemp || this.initialTemperature;
-        document.getElementById('tempRight').textContent = rightTemp || this.initialTemperature;
-        document.getElementById('tempDiff').textContent = Math.round(tempDiff);
+        if (this.gateOpen && !this.demonActive) {
+            // When gate is open and demon is off, show equilibrating temperatures
+            // Both chambers should approach the average temperature
+            const avgTemp = this.calculateAverageTemperature();
+            
+            // Show actual chamber temperatures approaching equilibrium
+            const actualLeftTemp = this.leftChamber.calculateTemperature();
+            const actualRightTemp = this.rightChamber.calculateTemperature();
+            
+            // For display, show the temperatures moving toward equilibrium
+            leftTemp = actualLeftTemp;
+            rightTemp = actualRightTemp;
+        } else {
+            // Normal chamber temperatures when demon is active or gate is closed
+            leftTemp = this.leftChamber.calculateTemperature();
+            rightTemp = this.rightChamber.calculateTemperature();
+        }
         
-        // Calculate actual entropy change
+        // Apply exponential smoothing
+        this.smoothedValues.leftTemp = this.smoothedValues.leftTemp * (1 - this.smoothingFactor) + 
+                                       leftTemp * this.smoothingFactor;
+        this.smoothedValues.rightTemp = this.smoothedValues.rightTemp * (1 - this.smoothingFactor) + 
+                                        rightTemp * this.smoothingFactor;
+        
+        // Only update display at intervals
+        if (shouldUpdateDisplay) {
+            this.lastDisplayUpdate = currentTime;
+            
+            const displayLeftTemp = Math.round(this.smoothedValues.leftTemp);
+            const displayRightTemp = Math.round(this.smoothedValues.rightTemp);
+            const tempDiff = Math.abs(displayLeftTemp - displayRightTemp);
+            
+            // Debug logging
+            if (this.frameCount % 300 === 0) { // Log every 5 seconds
+                console.log('Temperature debug:');
+                console.log('  Raw temps: Left =', leftTemp.toFixed(1), 'K, Right =', rightTemp.toFixed(1), 'K');
+                console.log('  Smoothed: Left =', this.smoothedValues.leftTemp.toFixed(1), 'K, Right =', this.smoothedValues.rightTemp.toFixed(1), 'K');
+                console.log('  Display: Left =', displayLeftTemp, 'K, Right =', displayRightTemp, 'K');
+                console.log('  Demon active:', this.demonActive, 'Gate open:', this.gateOpen);
+                if (this.gateOpen && !this.demonActive) {
+                    console.log('  Expected: Temperatures should be converging toward equilibrium');
+                }
+            }
+            
+            // Update displays with stable values
+            document.getElementById('tempLeft').textContent = displayLeftTemp || this.initialTemperature;
+            document.getElementById('tempRight').textContent = displayRightTemp || this.initialTemperature;
+            document.getElementById('tempDiff').textContent = Math.round(tempDiff);
+        }
+        
+        // Calculate actual entropy change with smoothing
         const entropyDecrease = this.calculateEntropyChange();
-        document.getElementById('entropyViolation').textContent = entropyDecrease.toFixed(1);
+        this.smoothedValues.entropyChange = this.smoothedValues.entropyChange * (1 - this.smoothingFactor * 0.5) + 
+                                            entropyDecrease * this.smoothingFactor * 0.5;
+        
+        if (shouldUpdateDisplay) {
+            document.getElementById('entropyViolation').textContent = this.smoothedValues.entropyChange.toFixed(1);
+        }
         
         // Calculate elapsed time
         const elapsed = this.running ? (Date.now() - this.startTime) / 1000 : 0;
         
         // Record data for export with circular buffer
-        if (this.running && elapsed > 0) {
-            // Add new data
+        if (this.running && elapsed > 0 && shouldUpdateDisplay) {
+            // Add smoothed data for cleaner exports
             this.dataHistory.time.push(elapsed);
-            this.dataHistory.tempLeft.push(leftTemp);
-            this.dataHistory.tempRight.push(rightTemp);
+            this.dataHistory.tempLeft.push(Math.round(this.smoothedValues.leftTemp));
+            this.dataHistory.tempRight.push(Math.round(this.smoothedValues.rightTemp));
             this.dataHistory.entropy.push(this.calculateEntropy());
             this.dataHistory.information.push(this.informationBits);
             this.dataHistory.erasureCost.push(this.erasureCost);
@@ -1023,13 +1304,13 @@ class MaxwellDemonSimulation {
         }
         
         // Calculate gate operations per second
-        const currentTime = Date.now();
-        const timeDiff = (currentTime - this.gateOperationTime) / 1000;
+        const gateUpdateTime = Date.now();
+        const timeDiff = (gateUpdateTime - this.gateOperationTime) / 1000;
         if (timeDiff > 1) {
             const opsPerSecond = this.gateOperations / timeDiff;
             document.getElementById('gateOps').textContent = Math.round(opsPerSecond);
             this.gateOperations = 0;
-            this.gateOperationTime = currentTime;
+            this.gateOperationTime = gateUpdateTime;
         }
         
         // Update timer and energy conservation
@@ -1040,43 +1321,120 @@ class MaxwellDemonSimulation {
             document.getElementById('timer').textContent = 
                 `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
             
-            // Energy conservation display
+            // Energy conservation display with smoothing
             const currentEnergy = this.calculateTotalEnergy();
             const energyRatio = currentEnergy / this.initialEnergy;
-            document.getElementById('energyConservation').textContent = 
-                (energyRatio * 100).toFixed(1);
+            if (shouldUpdateDisplay) {
+                document.getElementById('energyConservation').textContent = 
+                    (energyRatio * 100).toFixed(1);
+            }
             
-            // Demon efficiency
+            // Demon efficiency with smoothing
             const efficiency = this.totalGateCycles > 0 
                 ? (this.successfulSorts / this.totalGateCycles * 100)
                 : 0;
-            document.getElementById('demonEfficiency').textContent = 
-                Math.round(efficiency);
+            this.smoothedValues.efficiency = this.smoothedValues.efficiency * (1 - this.smoothingFactor * 0.3) + 
+                                             efficiency * this.smoothingFactor * 0.3;
+            if (shouldUpdateDisplay) {
+                document.getElementById('demonEfficiency').textContent = 
+                    Math.round(this.smoothedValues.efficiency);
+            }
             
-            // Information and Landauer limit
-            document.getElementById('infoBits').textContent = this.informationBits;
-            const landauerEnergy = this.informationBits * Math.log(2); // kT*ln(2) per bit
-            document.getElementById('landauerEnergy').textContent = landauerEnergy.toFixed(1);
-            
-            // Erasure cost (for realistic demon)
-            document.getElementById('erasureCost').textContent = this.erasureCost.toFixed(1);
+            // Information and Landauer limit - update less frequently
+            if (shouldUpdateDisplay) {
+                document.getElementById('infoBits').textContent = this.informationBits;
+                const landauerEnergy = this.informationBits * Math.log(2); // kT*ln(2) per bit
+                document.getElementById('landauerEnergy').textContent = landauerEnergy.toFixed(1);
+                
+                // Erasure cost (for realistic demon)
+                document.getElementById('erasureCost').textContent = this.erasureCost.toFixed(1);
+            }
             
             // Net entropy change including information costs
-            // Following the correct formula:
-            // ΔS_total = ΔS_system - I×ln(2)×k_B + E×ln(2)×k_B ≥ 0
+            // Correct physics: measurement/storage immediately creates entropy
             const currentEntropy = this.calculateEntropy();
             const systemEntropyChange = currentEntropy - this.initialEntropy;
             
-            // Information stored in demon's memory (negative contribution - removes entropy)
-            const informationEntropy = -this.informationBits * Math.log(2) * k_B;
+            // Debug entropy values (disabled for performance)
+            if (false && this.frameCount % 300 === 0) {
+                console.log('Entropy breakdown:');
+                console.log('Initial entropy:', this.initialEntropy.toFixed(3), 'k_B');
+                console.log('Current entropy:', currentEntropy.toFixed(3), 'k_B');
+                console.log('System entropy change:', systemEntropyChange.toFixed(3), 'k_B');
+                console.log('Information bits:', this.informationBits);
+            }
             
-            // Information erased (positive contribution - returns entropy to environment)
-            const erasureEntropy = this.erasureCost * k_B;
+            // Measurement cost depends on demon mode AND whether demon is active
+            let measurementCost, gateOperationCost, erasureEntropy;
+            
+            if (!this.demonActive) {
+                // When demon is OFF, no measurement or operation costs
+                // System naturally equilibrates, increasing entropy
+                measurementCost = 0;
+                gateOperationCost = 0;
+                erasureEntropy = 0;
+            } else if (this.demonMode === 'perfect') {
+                // Perfect demon operates at the theoretical Landauer limit
+                // Each bit costs exactly kT*ln(2), no more
+                measurementCost = this.informationBits * Math.log(2) * k_B;
+                
+                // No additional costs for perfect demon
+                gateOperationCost = 0; // Frictionless, reversible gate
+                erasureEntropy = 0; // Perfect memory management, no erasure needed
+                
+                // Perfect demon demonstrates the theoretical limit of reversible computation
+            } else {
+                // Realistic demon has multiple sources of inefficiency
+                // Base measurement cost with inefficiency
+                const baseCost = this.informationBits * Math.log(2) * k_B;
+                const measurementEfficiency = 0.5; // 50% efficient = 2x cost
+                measurementCost = baseCost / measurementEfficiency;
+                
+                // Gate operation cost: mechanical friction and imperfect switching
+                gateOperationCost = this.totalGateCycles * 0.1 * Math.log(2) * k_B;
+                
+                // Erasure cost: Additional entropy when information is erased from memory
+                erasureEntropy = this.erasureCost * k_B;
+            }
             
             // Total entropy must increase (Second Law)
-            const totalEntropyChange = systemEntropyChange + informationEntropy + erasureEntropy;
+            // ΔS_total = ΔS_chambers + ΔS_measurement + ΔS_gate + ΔS_erasure ≥ 0
+            const totalEntropyChange = systemEntropyChange + measurementCost + gateOperationCost + erasureEntropy;
             
-            document.getElementById('netEntropy').textContent = totalEntropyChange.toFixed(3);
+            // Store breakdown for display
+            this.entropyBreakdown = {
+                chamber: systemEntropyChange,
+                measurement: measurementCost,
+                gateOperations: gateOperationCost,
+                erasure: erasureEntropy,
+                total: totalEntropyChange
+            };
+            
+            // Debug the exact values being displayed
+            if (this.frameCount % 300 === 0) {
+                console.log('Entropy breakdown being displayed:');
+                console.log('Chamber ΔS:', this.entropyBreakdown.chamber.toFixed(3), 'k_B');
+                console.log('Measurement cost:', this.entropyBreakdown.measurement.toFixed(3), 'k_B');
+                console.log('Total net entropy:', this.entropyBreakdown.total.toFixed(3), 'k_B');
+            }
+            
+            // Apply smoothing to entropy values
+            this.smoothedValues.netEntropy = this.smoothedValues.netEntropy * (1 - this.smoothingFactor * 0.3) + 
+                                             totalEntropyChange * this.smoothingFactor * 0.3;
+            this.smoothedValues.measurementCost = this.smoothedValues.measurementCost * (1 - this.smoothingFactor * 0.3) + 
+                                                  measurementCost * this.smoothingFactor * 0.3;
+            
+            // Update physics breakdown display only at intervals
+            if (shouldUpdateDisplay) {
+                document.getElementById('netEntropy').textContent = this.smoothedValues.netEntropy.toFixed(3);
+                
+                if (this.entropyBreakdown) {
+                    document.getElementById('chamberEntropy').textContent = this.entropyBreakdown.chamber.toFixed(3);
+                    document.getElementById('measurementEntropy').textContent = this.smoothedValues.measurementCost.toFixed(3);
+                    document.getElementById('gateOperationsEntropy').textContent = this.entropyBreakdown.gateOperations.toFixed(3);
+                    document.getElementById('erasureEntropy').textContent = this.entropyBreakdown.erasure.toFixed(3);
+                }
+            }
             
             // Visual warning if Second Law would be violated
             const netEntropyElement = document.getElementById('netEntropy').parentElement;
@@ -1091,26 +1449,56 @@ class MaxwellDemonSimulation {
                 netEntropyElement.style.textShadow = '0 0 10px rgba(68, 255, 68, 0.8)';
             }
             
-            // Fluctuation probability
-            const fluctProb = this.calculateFluctuationProbability();
-            document.getElementById('fluctProb').textContent = fluctProb.toExponential(2);
-            
-            // Max entropy decrease
-            const maxEntropyPercent = this.initialEntropy > 0 
-                ? (this.maxEntropyDecrease / Math.abs(this.initialEntropy)) * 100 
-                : 0;
-            document.getElementById('maxEntropy').textContent = maxEntropyPercent.toFixed(1);
+            // Fluctuation probability - update less frequently
+            if (shouldUpdateDisplay) {
+                const fluctProb = this.calculateFluctuationProbability();
+                document.getElementById('fluctProb').textContent = fluctProb.toExponential(2);
+                
+                // Max entropy decrease
+                const maxEntropyPercent = this.initialEntropy > 0 
+                    ? (this.maxEntropyDecrease / Math.abs(this.initialEntropy)) * 100 
+                    : 0;
+                document.getElementById('maxEntropy').textContent = maxEntropyPercent.toFixed(1);
+            }
         }
     }
     
     render() {
+        // Increment frame counter
+        this.frameCount = (this.frameCount || 0) + 1;
+        
         // Create gradient background
-        const gradient = this.ctx.createLinearGradient(0, 0, this.width, 0);
+        const gradient = this.ctx.createLinearGradient(0, 0, this.width, this.height);
         gradient.addColorStop(0, '#0a0e1a');
-        gradient.addColorStop(0.5, '#0a0a0a');
+        gradient.addColorStop(0.3, '#0f0f1f');
+        gradient.addColorStop(0.7, '#1a0a1a');
         gradient.addColorStop(1, '#1a0e0a');
         this.ctx.fillStyle = gradient;
         this.ctx.fillRect(0, 0, this.width, this.height);
+        
+        // Add subtle animated grid (reduced density) - only update every few frames
+        if (this.frameCount % 3 === 0) {
+            this.ctx.save();
+            this.ctx.strokeStyle = 'rgba(100, 100, 255, 0.02)';
+            this.ctx.lineWidth = 1;
+            const gridSize = 80;
+            const gridOffset = (Date.now() / 400) % gridSize;
+            
+            this.ctx.beginPath();
+            // Vertical lines (fewer)
+            for (let x = -gridSize + gridOffset; x < this.width + gridSize; x += gridSize) {
+                this.ctx.moveTo(x, 0);
+                this.ctx.lineTo(x - 10, this.height);
+            }
+            
+            // Horizontal lines (fewer)
+            for (let y = -gridSize + gridOffset; y < this.height + gridSize; y += gridSize) {
+                this.ctx.moveTo(0, y);
+                this.ctx.lineTo(this.width, y - 5);
+            }
+            this.ctx.stroke();
+            this.ctx.restore();
+        }
         
         const centerX = this.width / 2;
         
@@ -1122,161 +1510,198 @@ class MaxwellDemonSimulation {
         
         // Draw gate with enhanced effects
         if (this.gateOpen) {
-            // Open gate with glow effect
+            // Animated energy field effect for open gate
+            this.ctx.save();
+            
+            // Pulsing glow
+            const pulsePhase = (Date.now() / 1000) % 2;
+            const pulseIntensity = 0.15 + Math.sin(pulsePhase * Math.PI) * 0.1;
+            
+            // Simplified glow effect
             const glowGradient = this.ctx.createLinearGradient(
-                centerX - this.gateWidth / 2, 0,
-                centerX + this.gateWidth / 2, 0
+                centerX - this.gateWidth / 2 - 10, 0,
+                centerX + this.gateWidth / 2 + 10, 0
             );
             if (this.demonActive) {
-                glowGradient.addColorStop(0, 'rgba(0, 255, 0, 0)');
-                glowGradient.addColorStop(0.5, 'rgba(0, 255, 0, 0.2)');
-                glowGradient.addColorStop(1, 'rgba(0, 255, 0, 0)');
+                glowGradient.addColorStop(0, `rgba(100, 255, 150, 0)`);
+                glowGradient.addColorStop(0.5, `rgba(100, 255, 150, ${pulseIntensity})`);
+                glowGradient.addColorStop(1, `rgba(100, 255, 150, 0)`);
             } else {
-                glowGradient.addColorStop(0, 'rgba(150, 150, 150, 0)');
-                glowGradient.addColorStop(0.5, 'rgba(150, 150, 150, 0.1)');
-                glowGradient.addColorStop(1, 'rgba(150, 150, 150, 0)');
+                glowGradient.addColorStop(0, `rgba(150, 150, 200, 0)`);
+                glowGradient.addColorStop(0.5, `rgba(150, 150, 200, ${pulseIntensity * 0.5})`);
+                glowGradient.addColorStop(1, `rgba(150, 150, 200, 0)`);
             }
             this.ctx.fillStyle = glowGradient;
-            this.ctx.fillRect(centerX - this.gateWidth / 2, 0, this.gateWidth, this.height);
-            
-            // Draw dashed outline
-            this.ctx.setLineDash([10, 5]);
-            this.ctx.strokeStyle = this.demonActive ? 'rgba(0, 255, 0, 0.8)' : 'rgba(150, 150, 150, 0.6)';
-            this.ctx.lineWidth = 2;
-            this.ctx.strokeRect(centerX - this.gateWidth / 2, 0, this.gateWidth, this.height);
-            this.ctx.setLineDash([]);
-        } else {
-            // Closed gate with metallic appearance
-            const metalGradient = this.ctx.createLinearGradient(
-                centerX - this.gateWidth / 2, 0,
-                centerX + this.gateWidth / 2, 0
+            this.ctx.fillRect(
+                centerX - this.gateWidth / 2 - 10, 0, 
+                this.gateWidth + 20, this.height
             );
-            metalGradient.addColorStop(0, '#333');
-            metalGradient.addColorStop(0.5, '#555');
-            metalGradient.addColorStop(1, '#333');
-            this.ctx.fillStyle = metalGradient;
+            
+            // Simplified energy field effect
+            if (this.frameCount % 2 === 0) {  // Update every other frame
+                this.ctx.strokeStyle = 'rgba(100, 255, 150, 0.3)';
+                this.ctx.lineWidth = 1;
+                const lineSpacing = 30;  // Fewer lines
+                const animOffset = (this.frameCount / 2) % lineSpacing;
+                
+                this.ctx.beginPath();
+                for (let y = -lineSpacing + animOffset; y < this.height + lineSpacing; y += lineSpacing) {
+                    this.ctx.moveTo(centerX - this.gateWidth / 2, y);
+                    this.ctx.lineTo(centerX + this.gateWidth / 2, y);
+                }
+                this.ctx.stroke();
+            }
+            
+            this.ctx.restore();
+        } else {
+            // Simplified closed gate
+            this.ctx.fillStyle = '#444';
             this.ctx.fillRect(centerX - this.gateWidth / 2, 0, this.gateWidth, this.height);
             
-            // Add warning stripes
+            // Simple hazard stripes (no animation for performance)
             this.ctx.save();
-            this.ctx.clip(new Path2D(`M${centerX - this.gateWidth / 2} 0 h${this.gateWidth} v${this.height} h-${this.gateWidth} z`));
-            this.ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+            this.ctx.strokeStyle = 'rgba(255, 100, 0, 0.4)';
             this.ctx.lineWidth = 3;
-            for (let y = -this.height; y < this.height * 2; y += 15) {
-                this.ctx.beginPath();
-                this.ctx.moveTo(centerX - this.gateWidth, y);
-                this.ctx.lineTo(centerX + this.gateWidth, y + 30);
-                this.ctx.stroke();
+            
+            this.ctx.beginPath();
+            for (let y = 0; y < this.height; y += 40) {
+                this.ctx.moveTo(centerX - this.gateWidth / 2, y);
+                this.ctx.lineTo(centerX + this.gateWidth / 2, y + 20);
+            }
+            this.ctx.stroke();
+            
+            this.ctx.restore();
+        }
+        
+        // Draw collision effects
+        for (const effect of this.collisionEffects) {
+            effect.render(this.ctx);
+        }
+        
+        // Draw particles efficiently
+        const meanSpeed = this.calculateMeanSpeed();
+        
+        // Draw trails first if in slow motion (batch operation)
+        if (this.slowMotion) {
+            this.ctx.save();
+            this.ctx.lineWidth = 2;
+            this.ctx.lineCap = 'round';
+            
+            for (const particle of this.particles) {
+                if (particle.trail.length > 1) {
+                    const speedRatio = particle.speed / meanSpeed;
+                    const hue = speedRatio > 1 ? 0 : 220;
+                    this.ctx.strokeStyle = `hsla(${hue}, 80%, 60%, 0.3)`;
+                    
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(particle.trail[0].x, particle.trail[0].y);
+                    for (let i = 1; i < particle.trail.length; i++) {
+                        this.ctx.lineTo(particle.trail[i].x, particle.trail[i].y);
+                    }
+                    this.ctx.stroke();
+                }
             }
             this.ctx.restore();
         }
         
-        // Draw particles with enhanced effects
-        const meanSpeed = this.calculateMeanSpeed();
-        
-        // First pass: draw trails and glows
+        // Draw all particles in single pass
         for (const particle of this.particles) {
             const speedRatio = particle.speed / meanSpeed;
-            const isFast = speedRatio > 1;
             
-            // Draw glow for fast particles
-            if (isFast && speedRatio > 1.2) {
-                const glowRadius = particle.radius * 3;
-                const glowGradient = this.ctx.createRadialGradient(
-                    particle.x, particle.y, 0,
-                    particle.x, particle.y, glowRadius
-                );
-                glowGradient.addColorStop(0, `hsla(0, 100%, 60%, ${0.3 * (speedRatio - 1)})`);
-                glowGradient.addColorStop(1, 'hsla(0, 100%, 60%, 0)');
-                this.ctx.fillStyle = glowGradient;
+            // Only add glow for extremely hot/cold particles (performance optimization)
+            if (speedRatio > 2.0 || speedRatio < 0.5) {
+                this.ctx.save();
+                this.ctx.globalAlpha = 0.2;
+                this.ctx.fillStyle = speedRatio > 2.0 ? '#ff6666' : '#6666ff';
                 this.ctx.beginPath();
-                this.ctx.arc(particle.x, particle.y, glowRadius, 0, Math.PI * 2);
+                this.ctx.arc(particle.x, particle.y, particle.radius * 2.5, 0, Math.PI * 2);
                 this.ctx.fill();
+                this.ctx.restore();
             }
             
-            // Draw trails in slow motion
-            if (this.slowMotion && particle.trail.length > 0) {
-                // Get base color and convert to RGBA
-                const baseColor = particle.getColor(meanSpeed);
-                const speedRatio = particle.speed / meanSpeed;
-                const hue = speedRatio > 1 ? 0 : 240;
-                const intensity = Math.min(speedRatio > 1 ? speedRatio - 1 : 1 - speedRatio, 1);
-                const lightness = 50 + intensity * 30;
-                
-                const gradient = this.ctx.createLinearGradient(
-                    particle.trail[0].x, particle.trail[0].y,
-                    particle.x, particle.y
-                );
-                gradient.addColorStop(0, `hsla(${hue}, 100%, ${lightness}%, 0)`);
-                gradient.addColorStop(1, `hsla(${hue}, 100%, ${lightness}%, 0.4)`);
-                
-                this.ctx.strokeStyle = gradient;
-                this.ctx.lineWidth = 2;
-                this.ctx.lineCap = 'round';
-                this.ctx.beginPath();
-                this.ctx.moveTo(particle.trail[0].x, particle.trail[0].y);
-                for (let i = 1; i < particle.trail.length; i++) {
-                    this.ctx.lineTo(particle.trail[i].x, particle.trail[i].y);
-                }
-                this.ctx.stroke();
-            }
-        }
-        
-        // Second pass: draw particles
-        for (const particle of this.particles) {
-            // Main particle body
+            // Main particle (no gradients for performance)
+            this.ctx.fillStyle = particle.getColor(meanSpeed);
             this.ctx.beginPath();
             this.ctx.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2);
-            this.ctx.fillStyle = particle.getColor(meanSpeed);
-            this.ctx.fill();
-            
-            // Add subtle highlight
-            const highlightGradient = this.ctx.createRadialGradient(
-                particle.x - particle.radius * 0.3, 
-                particle.y - particle.radius * 0.3, 
-                0,
-                particle.x, particle.y, particle.radius
-            );
-            highlightGradient.addColorStop(0, 'rgba(255, 255, 255, 0.3)');
-            highlightGradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-            this.ctx.fillStyle = highlightGradient;
             this.ctx.fill();
         }
         
-        // Draw demon at top
-        this.ctx.font = 'bold 32px monospace';
+        // Draw demon at top with enhanced presence
+        this.ctx.save();
+        
         if (this.demonActive) {
-            this.ctx.fillStyle = '#ffd700';
-            this.ctx.fillText('👹', centerX - 16, 40);
+            // Animated demon glow
+            const glowPhase = (Date.now() / 500) % (Math.PI * 2);
+            const glowSize = 30 + Math.sin(glowPhase) * 5;
             
-            // Gate status indicator
+            // Demon aura
+            const auraGradient = this.ctx.createRadialGradient(
+                centerX, 30, 0,
+                centerX, 30, glowSize
+            );
+            auraGradient.addColorStop(0, 'rgba(255, 215, 0, 0.3)');
+            auraGradient.addColorStop(0.5, 'rgba(255, 100, 0, 0.2)');
+            auraGradient.addColorStop(1, 'rgba(255, 50, 0, 0)');
+            this.ctx.fillStyle = auraGradient;
+            this.ctx.beginPath();
+            this.ctx.arc(centerX, 30, glowSize, 0, Math.PI * 2);
+            this.ctx.fill();
+            
+            // Demon emoji with shadow
+            this.ctx.shadowColor = 'rgba(255, 100, 0, 0.5)';
+            this.ctx.shadowBlur = 10;
+            this.ctx.font = 'bold 36px monospace';
+            this.ctx.fillStyle = '#ffd700';
+            const demonY = 40 + Math.sin(glowPhase * 2) * 2; // Slight floating animation
+            this.ctx.fillText('👹', centerX - 18, demonY);
+            this.ctx.shadowBlur = 0;
+            
+            // Gate status indicator with glow
             this.ctx.font = 'bold 14px monospace';
-            this.ctx.fillStyle = this.gateOpen ? '#00ff00' : '#ff0000';
-            this.ctx.fillText(this.gateOpen ? 'OPEN' : 'CLOSED', centerX - 25, 60);
+            if (this.gateOpen) {
+                this.ctx.shadowColor = 'rgba(0, 255, 0, 0.5)';
+                this.ctx.shadowBlur = 5;
+                this.ctx.fillStyle = '#00ff00';
+                this.ctx.fillText('▼ OPEN ▼', centerX - 35, 65);
+            } else {
+                this.ctx.shadowColor = 'rgba(255, 0, 0, 0.5)';
+                this.ctx.shadowBlur = 5;
+                this.ctx.fillStyle = '#ff0000';
+                this.ctx.fillText('◆ CLOSED ◆', centerX - 40, 65);
+            }
+            this.ctx.shadowBlur = 0;
             
             // Show theoretical mean speed threshold
             const theoreticalMean = this.calculateTheoreticalMeanSpeed();
             const actualMean = this.calculateMeanSpeed();
-            this.ctx.font = '11px monospace';
-            this.ctx.fillStyle = '#888';
-            this.ctx.fillText(`Threshold: ${theoreticalMean.toFixed(0)} px/s`, centerX - 50, 80);
-            this.ctx.fillText(`Actual mean: ${actualMean.toFixed(0)} px/s`, centerX - 50, 95);
+            this.ctx.font = '10px monospace';
+            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+            this.ctx.fillText(`Threshold: ${theoreticalMean.toFixed(0)} px/s`, centerX - 50, 85);
+            this.ctx.fillText(`Current: ${actualMean.toFixed(0)} px/s`, centerX - 50, 98);
         } else {
+            // Sleeping demon
+            this.ctx.font = '32px monospace';
             this.ctx.fillStyle = '#666';
-            this.ctx.fillText('😴', centerX - 16, 40);
+            const sleepY = 40 + Math.sin(Date.now() / 2000) * 3; // Gentle breathing animation
+            this.ctx.fillText('😴', centerX - 16, sleepY);
+            
+            // Z's for sleeping
+            const zPhase = (Date.now() / 1000) % 3;
+            this.ctx.font = `${12 + zPhase * 2}px monospace`;
+            this.ctx.fillStyle = `rgba(150, 150, 150, ${0.6 - zPhase * 0.2})`;
+            this.ctx.fillText('z', centerX + 20, 30 - zPhase * 5);
             
             // Demon inactive indicator
-            this.ctx.font = 'bold 14px monospace';
-            this.ctx.fillStyle = '#666';
-            this.ctx.fillText('INACTIVE', centerX - 30, 60);
+            this.ctx.font = '12px monospace';
+            this.ctx.fillStyle = 'rgba(150, 150, 150, 0.8)';
+            this.ctx.fillText('SLEEPING', centerX - 30, 65);
         }
         
-        // Draw velocity distribution histogram
-        if (this.showHistogram) {
-            this.drawVelocityHistogram();
-        }
+        this.ctx.restore();
         
-        // Draw phase space plot
+        // Velocity histogram removed for simplicity
+        
+        // Draw phase space plot (always draw to prevent flickering)
         if (this.showPhaseSpace) {
             this.drawPhaseSpace();
         }
@@ -1297,87 +1722,6 @@ class MaxwellDemonSimulation {
         }
     }
     
-    drawVelocityHistogram() {
-        // Position and size
-        const histX = HISTOGRAM_X;
-        const histY = this.height - HISTOGRAM_Y_OFFSET;
-        const histWidth = HISTOGRAM_WIDTH;
-        const histHeight = HISTOGRAM_HEIGHT;
-        
-        // Background
-        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        this.ctx.fillRect(histX - 10, histY - 10, histWidth + 20, histHeight + 20);
-        
-        // Create velocity bins
-        const maxSpeed = Math.max(...this.particles.map(p => p.speed));
-        this.maxHistogramSpeed = Math.max(this.maxHistogramSpeed, maxSpeed * 1.2);
-        const binSize = this.maxHistogramSpeed / this.histogramBins;
-        const bins = new Array(this.histogramBins).fill(0);
-        
-        // Count particles in each bin
-        this.particles.forEach(p => {
-            const binIndex = Math.min(Math.floor(p.speed / binSize), this.histogramBins - 1);
-            if (binIndex >= 0) bins[binIndex]++;
-        });
-        
-        // Find max count for scaling
-        const maxCount = Math.max(...bins, 1);
-        
-        // Draw histogram bars
-        const barWidth = histWidth / this.histogramBins;
-        this.ctx.fillStyle = 'rgba(100, 150, 255, 0.7)';
-        
-        for (let i = 0; i < this.histogramBins; i++) {
-            const barHeight = (bins[i] / maxCount) * histHeight;
-            this.ctx.fillRect(
-                histX + i * barWidth,
-                histY + histHeight - barHeight,
-                barWidth - 1,
-                barHeight
-            );
-        }
-        
-        // Draw theoretical Maxwell-Boltzmann curve
-        this.ctx.strokeStyle = '#ff0';
-        this.ctx.lineWidth = 2;
-        this.ctx.beginPath();
-        
-        const avgTemp = (this.leftChamber.calculateTemperature() + 
-                        this.rightChamber.calculateTemperature()) / 2;
-        
-        for (let i = 0; i <= 100; i++) {
-            const v = (i / 100) * this.maxHistogramSpeed;
-            const v_norm = v / VELOCITY_SCALE;
-            
-            // 2D Maxwell-Boltzmann: P(v) = (m/kT) * v * exp(-mv²/2kT)
-            const factor = MASS / (k_B * avgTemp / T_REF);
-            const prob = factor * v_norm * Math.exp(-factor * v_norm * v_norm / 2);
-            
-            // Scale to histogram
-            const probScaled = prob * this.particles.length * binSize / VELOCITY_SCALE;
-            const y = histY + histHeight - (probScaled / maxCount) * histHeight;
-            
-            if (i === 0) {
-                this.ctx.moveTo(histX, y);
-            } else {
-                this.ctx.lineTo(histX + (i / 100) * histWidth, y);
-            }
-        }
-        this.ctx.stroke();
-        
-        // Labels
-        this.ctx.fillStyle = '#fff';
-        this.ctx.font = '12px monospace';
-        this.ctx.fillText('Velocity Distribution', histX, histY - 15);
-        
-        // Axis labels
-        this.ctx.font = '10px monospace';
-        this.ctx.fillStyle = '#888';
-        this.ctx.fillText('0', histX - 5, histY + histHeight + 15);
-        this.ctx.fillText(`${this.maxHistogramSpeed.toFixed(0)}`, 
-                          histX + histWidth - 20, histY + histHeight + 15);
-        this.ctx.fillText('Speed (px/s)', histX + histWidth/2 - 30, histY + histHeight + 15);
-    }
     
     drawPhaseSpace() {
         // Position and size
@@ -1390,12 +1734,24 @@ class MaxwellDemonSimulation {
         this.ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
         this.ctx.fillRect(phaseX - 10, phaseY - 10, phaseWidth + 20, phaseHeight + 20);
         
-        // Create density map for better visualization
-        const gridSize = 10;
-        const densityGrid = this.createDensityGrid(gridSize);
+        // Update phase space data only at intervals
+        const currentTime = Date.now();
+        if (!this.phaseSpaceData || (currentTime - this.lastPhaseSpaceUpdate) > this.phaseSpaceUpdateInterval) {
+            this.lastPhaseSpaceUpdate = currentTime;
+            
+            // Create density map for better visualization
+            const gridSize = 10;
+            const densityGrid = this.createDensityGrid(gridSize);
+            
+            this.phaseSpaceData = {
+                densityGrid: densityGrid,
+                gridSize: gridSize,
+                maxDensity: Math.max(...densityGrid.flat())
+            };
+        }
         
-        // Draw density heatmap
-        const maxDensity = Math.max(...densityGrid.flat());
+        // Use cached data
+        const { densityGrid, gridSize, maxDensity } = this.phaseSpaceData;
         if (maxDensity > 0) {
             for (let i = 0; i < gridSize; i++) {
                 for (let j = 0; j < gridSize; j++) {
