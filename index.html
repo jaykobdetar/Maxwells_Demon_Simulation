@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maxwell's Demon Simulation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Maxwell's Demon Simulation</h1>
+        
+        <div class="canvas-container">
+            <canvas id="simulationCanvas"></canvas>
+            <div class="temperature-display">
+                <div class="temp-left">
+                    <h3>Left Chamber</h3>
+                    <span id="tempLeft">300</span> K
+                </div>
+                <div class="temp-right">
+                    <h3>Right Chamber</h3>
+                    <span id="tempRight">300</span> K
+                </div>
+            </div>
+        </div>
+        
+        <!-- Units & Scales Documentation Panel -->
+        <details class="units-panel">
+            <summary>Units & Scales Documentation</summary>
+            <div class="units-content">
+                <h3>Normalized Unit System</h3>
+                <p>This simulation uses normalized units for computational efficiency:</p>
+                <ul>
+                    <li><strong>Energy Scale:</strong> k<sub>B</sub>T = 1 at T = 300K</li>
+                    <li><strong>Mass:</strong> m = 1 (≈ argon atom mass)</li>
+                    <li><strong>Velocity:</strong> 100 px/s = √(k<sub>B</sub>T/m) ≈ 400 m/s for argon at 300K</li>
+                    <li><strong>Length:</strong> 1 pixel ≈ 10 nm (nanometer scale)</li>
+                    <li><strong>Time:</strong> 1 second ≈ 25 ns (nanosecond scale)</li>
+                </ul>
+                <h3>Physical Equivalents</h3>
+                <ul>
+                    <li><strong>300K:</strong> Room temperature (27°C)</li>
+                    <li><strong>1000K:</strong> Red hot metal temperature</li>
+                    <li><strong>Information bit:</strong> k<sub>B</sub>·ln(2) ≈ 0.693 k<sub>B</sub> entropy</li>
+                    <li><strong>Landauer limit:</strong> k<sub>B</sub>T·ln(2) ≈ 3×10<sup>-21</sup> J at 300K</li>
+                </ul>
+                <h3>Thermal de Broglie Wavelength</h3>
+                <p>λ = h/√(2πmk<sub>B</sub>T) ≈ 16 pm for argon at 300K</p>
+                <p>This quantum length scale appears in the entropy calculation.</p>
+            </div>
+        </details>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label for="tempSlider" title="Temperature in Kelvin. 300K = room temperature (27°C), 373K = boiling water, 77K = liquid nitrogen">Initial Temperature: <span id="tempValue">300</span> K</label>
+                <input type="range" id="tempSlider" min="100" max="2000" value="300" step="25" title="Mean particle speed at 300K: ~400 m/s for argon">
+            </div>
+            
+            <div class="control-group">
+                <label for="particleCount" title="Number of gas particles. Each represents an argon atom in this simulation">Particle Count: <span id="particleValue">150</span></label>
+                <input type="range" id="particleCount" min="50" max="500" value="150" step="10" title="Real gas at STP: ~10²⁵ particles/m³">
+            </div>
+            
+            <div class="control-group">
+                <label for="speedMultiplier" title="Time acceleration factor. 1x = real molecular timescale (~nanoseconds)">Simulation Speed: <span id="speedValue">1.0</span>x</label>
+                <input type="range" id="speedMultiplier" min="0.5" max="3" value="1" step="0.1">
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="slowMotion">
+                    Slow Motion (10x slower)
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="demonActive" checked>
+                    Demon Active
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showHistogram" checked>
+                    Show Velocity Distribution
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showPhaseSpace" checked>
+                    Show Phase Space
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showAnnotations">
+                    Show Annotations
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showPerformance">
+                    Show Performance Metrics
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label for="demonMode">Demon Mode:</label>
+                <select id="demonMode">
+                    <option value="perfect">Perfect (Infinite Memory)</option>
+                    <option value="realistic">Realistic (50-bit Memory)</option>
+                </select>
+            </div>
+            
+            <div class="control-group" id="memoryStrategyGroup" style="display: none;">
+                <label for="memoryStrategy">Memory Strategy:</label>
+                <select id="memoryStrategy">
+                    <option value="fifo">FIFO (First In, First Out)</option>
+                    <option value="lru">LRU (Least Recently Used)</option>
+                    <option value="selective">Selective (Information Value)</option>
+                    <option value="compressed">Compressed (Variable Precision)</option>
+                </select>
+            </div>
+            
+            <div class="control-group" id="memoryCapacityGroup" style="display: none;">
+                <label for="memoryCapacity">Memory Capacity: <span id="memoryCapacityValue">50</span> bits</label>
+                <input type="range" id="memoryCapacity" min="10" max="200" value="50" step="10">
+            </div>
+            
+            <div class="button-group">
+                <button id="launchBtn" class="btn-primary">Launch</button>
+                <button id="pauseBtn" class="btn-primary" disabled>Pause</button>
+                <button id="stepBtn" class="btn-secondary" disabled>Step</button>
+                <button id="resetBtn" class="btn-secondary">Reset</button>
+                <button id="exportBtn" class="btn-secondary">Export</button>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-item">
+                    <span class="stat-label">Elapsed Time</span>
+                    <span class="stat-value" id="timer">00:00</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Temperature difference between chambers. Demon creates this by sorting particles.">Temperature Difference</span>
+                    <span class="stat-value"><span id="tempDiff">0</span> K</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Percentage decrease in system entropy from initial state. Temporary decreases are allowed but must be compensated.">Entropy Decrease</span>
+                    <span class="stat-value"><span id="entropyViolation">0</span>%</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Verifies that total kinetic energy remains constant (perfectly elastic collisions).">Energy Conservation</span>
+                    <span class="stat-value"><span id="energyConservation">100.0</span>%</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Number of times the demon opens/closes the gate per second.">Gate Operations</span>
+                    <span class="stat-value"><span id="gateOps">0</span>/s</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Percentage of gate operations that successfully sorted particles (fast to hot, slow to cold).">Demon Efficiency</span>
+                    <span class="stat-value"><span id="demonEfficiency">0</span>%</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Total bits of information the demon has measured about particles.">Information Used</span>
+                    <span class="stat-value"><span id="infoBits">0</span> bits</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Theoretical minimum energy cost of information processing: kT×ln(2) per bit.">Landauer Limit</span>
+                    <span class="stat-value"><span id="landauerEnergy">0</span> kT</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Energy cost of erasing information from demon's finite memory. Each erasure costs kT×ln(2).">Erasure Cost</span>
+                    <span class="stat-value"><span id="erasureCost">0</span> kT</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Total entropy change including system, information storage, and erasure costs. Must be ≥ 0 to satisfy Second Law.">Net Entropy Change</span>
+                    <span class="stat-value"><span id="netEntropy">0</span> k<sub>B</sub></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Probability of observing the current entropy decrease by thermal fluctuations alone: P = exp(-ΔS/k).">Fluctuation Probability</span>
+                    <span class="stat-value"><span id="fluctProb">1.0</span></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label" title="Maximum percentage decrease in entropy observed during the simulation.">Max Entropy Decrease</span>
+                    <span class="stat-value"><span id="maxEntropy">0</span>%</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="simulation.js"></script>
+</body>
+</html>
