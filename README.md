@@ -1,7 +1,8 @@
-![image](https://github.com/user-attachments/assets/2f645eec-b383-40ca-a9a7-85db73a3716b)
-![image](https://github.com/user-attachments/assets/89ca6f7e-7c2d-4f91-9b19-5b2c95ea6620)
-![image](https://github.com/user-attachments/assets/15ea3f09-0907-4040-ba3f-9fd81ceef9b1)
-# Maxwell's Demon Simulation
+![image](https://github.com/user-attachments/assets/b1329760-89fe-4ab9-b0c1-a2fbef681c11)
+![image](https://github.com/user-attachments/assets/68733c7e-7b4d-4450-82e0-2c4c73be7ff4)
+![image](https://github.com/user-attachments/assets/d9e52ac8-1f7c-4e1c-ad92-c77bc3df6ec0)
+
+
 
 A 2D browser-based demonstration of Maxwell’s Demon operating on an ideal gas. Explore thermodynamics, entropy, and the information–energy tradeoff in real time.
 
