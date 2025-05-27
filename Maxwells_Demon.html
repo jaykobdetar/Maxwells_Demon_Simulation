@@ -3,205 +3,326 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Maxwell's Demon Simulation</title>
+    <title>Maxwell's Demon: Information and Thermodynamics</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="container">
-        <h1>Maxwell's Demon Simulation</h1>
+        <header class="main-header">
+            <h1>Maxwell's Demon</h1>
+            <p class="subtitle">Can a tiny demon violate the laws of physics? Discover why information has a cost.</p>
+        </header>
         
-        <div class="canvas-container">
-            <canvas id="simulationCanvas"></canvas>
-            <div class="temperature-display">
-                <div class="temp-left">
-                    <h3>Left Chamber</h3>
-                    <span id="tempLeft">300</span> K
+        <!-- Main Simulation -->
+        <div class="simulation-section">
+            <div class="canvas-container">
+                <canvas id="simulationCanvas"></canvas>
+                
+                <!-- Temperature Display -->
+                <div class="temperature-display">
+                    <div class="temp-left">
+                        <h3>Left Chamber</h3>
+                        <span id="tempLeft">300</span> K
+                    </div>
+                    <div class="temp-right">
+                        <h3>Right Chamber</h3>
+                        <span id="tempRight">300</span> K
+                    </div>
                 </div>
-                <div class="temp-right">
-                    <h3>Right Chamber</h3>
-                    <span id="tempRight">300</span> K
+                
+                <!-- Real-time Information Display -->
+                <div class="info-display">
+                    <div class="info-box" title="Total information bits the demon has collected">
+                        <span class="info-label">🧠 Information Stored</span>
+                        <span class="info-value"><span id="infoBits">0</span> bits</span>
+                    </div>
+                    <div class="info-box" title="Thermodynamic cost of the information">
+                        <span class="info-label">💸 Energy Cost</span>
+                        <span class="info-value"><span id="landauerEnergy">0</span> k<sub>B</sub>T</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Information-Entropy Relationship Panel -->
+            <div class="info-entropy-panel">
+                <h3>The Fundamental Trade-off: Order vs Information</h3>
+                <p class="sync-disclaimer">Values shown are smoothed for clarity (~1s delay). Negative totals early in the simulation are display artifacts, not physics violations.</p>
+                <div class="entropy-equation-display">
+                    <div class="entropy-term">
+                        <div class="term-header">
+                            <span class="term-title">Order Created</span>
+                            <span class="term-subtitle">(Gas becomes sorted)</span>
+                        </div>
+                        <div class="term-value-box negative">
+                            <span class="value-label">ΔS<sub>gas</sub> = </span>
+                            <span class="value-number" id="chamberEntropy">0</span>
+                            <span class="value-unit">k<sub>B</sub></span>
+                        </div>
+                        <div class="term-description">Entropy decreases as fast/slow molecules separate</div>
+                    </div>
+                    
+                    <div class="equation-operator">+</div>
+                    
+                    <div class="entropy-term">
+                        <div class="term-header">
+                            <span class="term-title">Information Cost</span>
+                            <span class="term-subtitle">(Demon's knowledge)</span>
+                        </div>
+                        <div class="term-value-box positive">
+                            <span class="value-label">ΔS<sub>info</sub> = </span>
+                            <span class="value-number" id="measurementEntropy">0</span>
+                            <span class="value-unit">k<sub>B</sub></span>
+                        </div>
+                        <div class="term-description">Each bit costs at least k<sub>B</sub>ln(2) entropy</div>
+                    </div>
+                    
+                    <div class="equation-operator">=</div>
+                    
+                    <div class="entropy-term">
+                        <div class="term-header">
+                            <span class="term-title">Universe Total</span>
+                            <span class="term-subtitle">(Must increase!)</span>
+                        </div>
+                        <div class="term-value-box total">
+                            <span class="value-label">ΔS<sub>total</sub> = </span>
+                            <span class="value-number" id="netEntropy">0</span>
+                            <span class="value-unit">k<sub>B</sub></span>
+                        </div>
+                        <div class="term-description">Second Law: This must always be ≥ 0</div>
+                    </div>
+                </div>
+                
+                <div class="visual-bars">
+                    <div class="bar-chart">
+                        <div class="bar-item">
+                            <div class="bar-label">Gas Order</div>
+                            <div class="bar-track">
+                                <div class="bar negative" id="chamberEntropyBar"></div>
+                                <div class="bar-value" id="chamberEntropyBarValue"></div>
+                            </div>
+                        </div>
+                        <div class="bar-item">
+                            <div class="bar-label">Info Cost</div>
+                            <div class="bar-track">
+                                <div class="bar positive" id="infoEntropyBar"></div>
+                                <div class="bar-value" id="infoEntropyBarValue"></div>
+                            </div>
+                        </div>
+                        <div class="bar-item">
+                            <div class="bar-label">Net Total</div>
+                            <div class="bar-track">
+                                <div class="bar total" id="totalEntropyBar"></div>
+                                <div class="bar-value" id="totalEntropyBarValue"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
-        
-        <!-- Units & Scales Documentation Panel -->
-        <details class="units-panel">
-            <summary>Units & Scales Documentation</summary>
-            <div class="units-content">
-                <h3>Normalized Unit System</h3>
-                <p>This simulation uses normalized units for computational efficiency:</p>
+
+        <!-- Experiment Controls -->
+        <div class="experiment-controls">
+            <div class="control-section">
+                <h4>🚀 Start the Simulation</h4>
+                <div class="button-group">
+                    <button id="launchBtn" class="btn-primary">🚀 Launch</button>
+                    <button id="pauseBtn" class="btn-primary" disabled>⏸️ Pause</button>
+                    <button id="resetBtn" class="btn-secondary">🔄 Reset</button>
+                </div>
+            </div>
+            
+            <div class="control-section">
+                <h4>👹 Control the Demon</h4>
+                <div class="demon-controls">
+                    <label class="switch-label">
+                        <input type="checkbox" id="demonActive" checked>
+                        <span class="switch"></span>
+                        <span>Demon Active</span>
+                    </label>
+                    <p class="control-hint">Turn off to see natural equilibration</p>
+                </div>
+            </div>
+            
+            <div class="control-section">
+                <h4>🎛️ Adjust Parameters</h4>
+                <div class="parameter-controls">
+                    <div class="control-group">
+                        <label>Initial Temperature: <span id="tempValue">300</span> K</label>
+                        <input type="range" id="tempSlider" min="100" max="2000" value="300" step="25">
+                    </div>
+                    <div class="control-group">
+                        <label>Particle Count: <span id="particleValue">300</span></label>
+                        <input type="range" id="particleCount" min="50" max="1000" value="300" step="10">
+                    </div>
+                    <div class="control-group slow-motion-control">
+                        <label class="switch-label">
+                            <input type="checkbox" id="slowMotion">
+                            <span class="switch"></span>
+                            <span>Slow Motion (10× slower)</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="observations">
+                <h4>💡 Watch for:</h4>
                 <ul>
-                    <li><strong>Energy Scale:</strong> k<sub>B</sub>T = 1 at T = 300K</li>
-                    <li><strong>Mass:</strong> m = 1 (≈ argon atom mass)</li>
-                    <li><strong>Velocity:</strong> 100 px/s = √(k<sub>B</sub>T/m) ≈ 400 m/s for argon at 300K</li>
-                    <li><strong>Length:</strong> 1 pixel ≈ 10 nm (nanometer scale)</li>
-                    <li><strong>Time:</strong> 1 second ≈ 25 ns (nanosecond scale)</li>
+                    <li>🌡️ Temperature difference grows when demon is active</li>
+                    <li>🧠 Information bits accumulate with each particle sorted</li>
+                    <li>⚖️ Total entropy always increases (physics is preserved!)</li>
+                    <li>🔄 When demon turns off, temperatures equalize naturally</li>
                 </ul>
-                <h3>Physical Equivalents</h3>
-                <ul>
-                    <li><strong>300K:</strong> Room temperature (27°C)</li>
-                    <li><strong>1000K:</strong> Red hot metal temperature</li>
-                    <li><strong>Information bit:</strong> k<sub>B</sub>·ln(2) ≈ 0.693 k<sub>B</sub> entropy</li>
-                    <li><strong>Landauer limit:</strong> k<sub>B</sub>T·ln(2) ≈ 3×10<sup>-21</sup> J at 300K</li>
-                </ul>
-                <h3>Thermal de Broglie Wavelength</h3>
-                <p>λ = h/√(2πmk<sub>B</sub>T) ≈ 16 pm for argon at 300K</p>
-                <p>In simulation: λ ≈ 0.0016 pixels (properly scaled for accurate entropy)</p>
-                <p>This quantum length scale determines absolute entropy values via Sackur-Tetrode equation.</p>
             </div>
-        </details>
-        
-        <div class="controls">
-            <div class="control-group">
-                <label for="tempSlider" title="Temperature in Kelvin. 300K = room temperature (27°C), 373K = boiling water, 77K = liquid nitrogen">Initial Temperature: <span id="tempValue">300</span> K</label>
-                <input type="range" id="tempSlider" min="100" max="2000" value="300" step="25" title="Mean particle speed at 300K: ~400 m/s for argon">
+        </div>
+
+        <!-- Single Explainer Section -->
+        <div class="explainer-section">
+            <div class="explainer-toggle">
+                <button class="explainer-btn" onclick="toggleExplainer()">
+                    📚 What's Maxwell's Demon? <span class="toggle-icon">▼</span>
+                </button>
             </div>
-            
-            <div class="control-group">
-                <label for="particleCount" title="Number of gas particles. Each represents an argon atom in this simulation">Particle Count: <span id="particleValue">150</span></label>
-                <input type="range" id="particleCount" min="50" max="500" value="150" step="10" title="Real gas at STP: ~10²⁵ particles/m³">
+            <div class="explainer-content" id="explainerContent">
+                <div class="explainer-card">
+                    <h4>⚡ The Thermodynamic Paradox</h4>
+                    <p>Maxwell's demon appears to violate the Second Law of Thermodynamics—the fundamental principle that entropy (disorder) must always increase in an isolated system. The demon sorts hot and cold molecules without doing any apparent work, creating order from disorder.</p>
+                    <p>This would allow us to extract useful energy from a single-temperature reservoir, making perpetual motion machines possible. The demon seems to decrease entropy by creating a temperature gradient that could drive a heat engine, all while expending no energy itself.</p>
+                </div>
+                
+                <div class="explainer-card">
+                    <h4>🧠 The Information-Theoretic Resolution</h4>
+                    <p>The resolution came through understanding information as a physical quantity. Leo Szilard (1929) and later Rolf Landauer (1961) showed that information processing has thermodynamic consequences:</p>
+                    <ul style="text-align: left; margin: 10px 0;">
+                        <li><strong>Measurement:</strong> The demon must observe each molecule to decide whether to open the gate</li>
+                        <li><strong>Memory:</strong> Each measurement creates at least 1 bit of information that must be stored</li>
+                        <li><strong>Erasure:</strong> Eventually the demon's memory fills up and must be erased</li>
+                        <li><strong>Landauer's Principle:</strong> Erasing 1 bit of information at temperature T requires at least k<sub>B</sub>T ln(2) of energy dissipation</li>
+                    </ul>
+                    <p>The entropy decrease from sorting is exactly balanced by the entropy increase from information erasure, preserving the Second Law!</p>
+                </div>
+                
+                <div class="explainer-card">
+                    <h4>📊 The Mathematical Balance</h4>
+                    <p>The simulation demonstrates this fundamental equation:</p>
+                    <p style="text-align: center; font-size: 1.1em; margin: 15px 0;">
+                        <strong>ΔS<sub>gas</sub> + ΔS<sub>info</sub> ≥ 0</strong>
+                    </p>
+                    <p>Where ΔS<sub>gas</sub> is negative (order created by sorting) and ΔS<sub>info</sub> is positive (disorder from information processing). The demon can temporarily create local order, but only by increasing disorder elsewhere through information handling.</p>
+                </div>
+                
+                <div class="explainer-card">
+                    <h4>🔍 Understanding the Display</h4>
+                    <p><strong>Why negative values appear:</strong> The displayed values use smoothing to reduce visual noise. When the simulation starts, the demon may quickly create order before the information cost display "catches up," causing the total to briefly appear negative.</p>
+                    <p><strong>Physics integrity:</strong> The underlying physics calculations are always correct—the Second Law is never violated. The actual entropy accounting shows that every bit of order created is immediately paid for by information entropy. The ~1 second display lag is purely cosmetic and doesn't affect the simulation's accuracy.</p>
+                    <p><strong>Verification:</strong> After a few seconds, the display synchronizes and you'll see the fundamental truth: the total entropy change is always positive or zero, confirming that even Maxwell's demon cannot defeat thermodynamics!</p>
+                </div>
             </div>
-            
-            <div class="control-group">
-                <label for="speedMultiplier" title="Time acceleration factor. 1x = real molecular timescale (~nanoseconds)">Simulation Speed: <span id="speedValue">1.0</span>x</label>
-                <input type="range" id="speedMultiplier" min="0.5" max="3" value="1" step="0.1">
-            </div>
-            
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="slowMotion">
-                    Slow Motion (10x slower)
-                </label>
-            </div>
-            
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="demonActive" checked>
-                    Demon Active
-                </label>
-            </div>
-            
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="showHistogram" checked>
-                    Show Velocity Distribution
-                </label>
-            </div>
-            
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="showPhaseSpace" checked>
-                    Show Phase Space
-                </label>
-            </div>
-            
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="showAnnotations">
-                    Show Annotations
-                </label>
-            </div>
-            
-            <div class="control-group">
-                <label>
-                    <input type="checkbox" id="showPerformance">
-                    Show Performance Metrics
-                </label>
-            </div>
-            
-            <div class="control-group">
-                <label for="demonMode">Demon Mode:</label>
-                <select id="demonMode">
-                    <option value="perfect">Perfect (Infinite Memory)</option>
-                    <option value="realistic">Realistic (50-bit Memory)</option>
-                </select>
-            </div>
-            
-            <div class="control-group" id="memoryStrategyGroup" style="display: none;">
-                <label for="memoryStrategy">Memory Strategy:</label>
+        </div>
+
+        <!-- Hidden elements for compatibility -->
+        <div style="display: none;">
+            <select id="demonMode">
+                <option value="realistic" selected>Realistic Demon</option>
+                <option value="perfect">Perfect Demon</option>
+            </select>
+            <input type="checkbox" id="showHistogram" checked>
+            <input type="checkbox" id="showPerformance">
+            <input type="checkbox" id="showPhaseSpace" checked>
+            <input type="checkbox" id="showAnnotations">
+            <button id="stepBtn">Step</button>
+            <button id="exportBtn">Export</button>
+            <span id="speedValue">1.0</span>
+            <input type="range" id="speedMultiplier" min="0.5" max="3" value="1" step="0.1">
+            <span id="timer">00:00</span>
+            <span id="tempDiff">0</span>
+            <span id="energyConservation">100.0</span>
+            <span id="gateOps">0</span>
+            <span id="demonEfficiency">0</span>
+            <span id="entropyViolation">0</span>
+            <span id="erasureCost">0</span>
+            <span id="gateOperationsEntropy">0</span>
+            <span id="erasureEntropy">0</span>
+            <span id="fluctProb">1.0</span>
+            <span id="maxEntropy">0</span>
+            <div id="memoryStrategyGroup" style="display: none;">
                 <select id="memoryStrategy">
-                    <option value="fifo">FIFO (First In, First Out)</option>
-                    <option value="lru">LRU (Least Recently Used)</option>
-                    <option value="selective">Selective (Information Value)</option>
-                    <option value="compressed">Compressed (Variable Precision)</option>
+                    <option value="fifo">FIFO</option>
+                    <option value="lru">LRU</option>
+                    <option value="random">Random</option>
                 </select>
             </div>
-            
-            <div class="control-group" id="memoryCapacityGroup" style="display: none;">
-                <label for="memoryCapacity">Memory Capacity: <span id="memoryCapacityValue">50</span> bits</label>
-                <input type="range" id="memoryCapacity" min="10" max="200" value="50" step="10">
-            </div>
-            
-            <div class="button-group">
-                <button id="launchBtn" class="btn-primary">Launch</button>
-                <button id="pauseBtn" class="btn-primary" disabled>Pause</button>
-                <button id="stepBtn" class="btn-secondary" disabled>Step</button>
-                <button id="resetBtn" class="btn-secondary">Reset</button>
-                <button id="exportBtn" class="btn-secondary">Export</button>
-            </div>
-            
-            <div class="stats">
-                <div class="stat-item">
-                    <span class="stat-label">Elapsed Time</span>
-                    <span class="stat-value" id="timer">00:00</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Temperature difference between chambers. Demon creates this by sorting particles.">Temperature Difference</span>
-                    <span class="stat-value"><span id="tempDiff">0</span> K</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Percentage decrease in system entropy from initial state. Temporary decreases are allowed but must be compensated.">Entropy Decrease</span>
-                    <span class="stat-value"><span id="entropyViolation">0</span>%</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Verifies that total kinetic energy remains constant (perfectly elastic collisions).">Energy Conservation</span>
-                    <span class="stat-value"><span id="energyConservation">100.0</span>%</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Number of times the demon opens/closes the gate per second.">Gate Operations</span>
-                    <span class="stat-value"><span id="gateOps">0</span>/s</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Percentage of gate operations that successfully sorted particles (fast to hot, slow to cold).">Demon Efficiency</span>
-                    <span class="stat-value"><span id="demonEfficiency">0</span>%</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Total bits of information the demon has measured about particles.">Information Used</span>
-                    <span class="stat-value"><span id="infoBits">0</span> bits</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Theoretical minimum energy cost of information processing: kT×ln(2) per bit.">Landauer Limit</span>
-                    <span class="stat-value"><span id="landauerEnergy">0</span> kT</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Energy cost of erasing information from demon's finite memory. Each erasure costs kT×ln(2).">Erasure Cost</span>
-                    <span class="stat-value"><span id="erasureCost">0</span> kT</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Total entropy change including system, information storage, and erasure costs. Must be ≥ 0 to satisfy Second Law.">Net Entropy Change</span>
-                    <span class="stat-value"><span id="netEntropy">0</span> k<sub>B</sub></span>
-                    <details class="entropy-breakdown">
-                        <summary>Physics Breakdown</summary>
-                        <div class="breakdown-content">
-                            <div>Chamber ΔS: <span id="chamberEntropy">0</span> k<sub>B</sub></div>
-                            <div>Measurement cost: <span id="measurementEntropy">0</span> k<sub>B</sub></div>
-                            <div>Gate operations: <span id="gateOperationsEntropy">0</span> k<sub>B</sub></div>
-                            <div>Erasure cost: <span id="erasureEntropy">0</span> k<sub>B</sub></div>
-                        </div>
-                    </details>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Probability of observing the current entropy decrease by thermal fluctuations alone: P = exp(-ΔS/k).">Fluctuation Probability</span>
-                    <span class="stat-value"><span id="fluctProb">1.0</span></span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label" title="Maximum percentage decrease in entropy observed during the simulation.">Max Entropy Decrease</span>
-                    <span class="stat-value"><span id="maxEntropy">0</span>%</span>
-                </div>
+            <div id="memoryCapacityGroup" style="display: none;">
+                <input type="range" id="memoryCapacity" min="10" max="100" value="50">
+                <span id="memoryCapacityValue">50</span>
             </div>
         </div>
     </div>
-    
+
     <script src="simulation.js"></script>
+    <script>
+        function toggleExplainer() {
+            const content = document.getElementById('explainerContent');
+            const icon = document.querySelector('.toggle-icon');
+            
+            if (content.style.display === 'none' || content.style.display === '') {
+                content.style.display = 'block';
+                icon.textContent = '▲';
+            } else {
+                content.style.display = 'none';
+                icon.textContent = '▼';
+            }
+        }
+
+        // Initially hide explainer content
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('explainerContent').style.display = 'none';
+        });
+
+        // Update entropy bars
+        function updateEntropyBars() {
+            const chamberEntropy = parseFloat(document.getElementById('chamberEntropy').textContent) || 0;
+            const infoEntropy = parseFloat(document.getElementById('measurementEntropy').textContent) || 0;
+            const totalEntropy = parseFloat(document.getElementById('netEntropy').textContent) || 0;
+            
+            // Update bar widths (scale for visibility)
+            const maxScale = 100; // Maximum bar width
+            const scale = 30; // Scale factor
+            
+            // Calculate bar widths
+            const chamberWidth = Math.min(Math.abs(chamberEntropy * scale), maxScale);
+            const infoWidth = Math.min(Math.abs(infoEntropy * scale), maxScale);
+            const totalWidth = Math.min(Math.abs(totalEntropy * scale), maxScale);
+            
+            // Update chamber entropy bar
+            const chamberBar = document.getElementById('chamberEntropyBar');
+            const chamberValue = document.getElementById('chamberEntropyBarValue');
+            if (chamberBar && chamberValue) {
+                chamberBar.style.width = chamberWidth + '%';
+                chamberBar.className = chamberEntropy < 0 ? 'bar negative' : 'bar positive';
+                chamberValue.textContent = chamberEntropy.toFixed(1);
+            }
+            
+            // Update info entropy bar
+            const infoBar = document.getElementById('infoEntropyBar');
+            const infoValue = document.getElementById('infoEntropyBarValue');
+            if (infoBar && infoValue) {
+                infoBar.style.width = infoWidth + '%';
+                infoBar.className = 'bar positive';
+                infoValue.textContent = infoEntropy.toFixed(1);
+            }
+            
+            // Update total entropy bar
+            const totalBar = document.getElementById('totalEntropyBar');
+            const totalValue = document.getElementById('totalEntropyBarValue');
+            if (totalBar && totalValue) {
+                totalBar.style.width = totalWidth + '%';
+                totalBar.className = totalEntropy < 0 ? 'bar negative' : 'bar positive';
+                totalValue.textContent = totalEntropy.toFixed(1);
+            }
+        }
+
+        // Update bars periodically
+        setInterval(updateEntropyBars, 1000);
+    </script>
 </body>
 </html>

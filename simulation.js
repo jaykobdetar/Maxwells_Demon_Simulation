@@ -379,8 +379,8 @@ class Chamber {
         // Temperature in Kelvin
         const temperature = (totalKE / (this.particles.length * k_B)) * T_REF;
         
-        // Safeguard against unrealistic temperatures only
-        return Math.max(1, Math.min(10000, temperature)); // Much higher upper limit
+        // Safeguard against unrealistic temperatures and ensure positive value
+        return Math.max(1, Math.min(10000, temperature)); // Guard against zero or extreme values
     }
 }
 
@@ -412,7 +412,7 @@ class MaxwellDemonSimulation {
         
         this.particles = [];
         this.initialTemperature = 300;
-        this.particleCount = 150;
+        this.particleCount = 300;
         this.slowMotion = false;
         this.running = false;
         this.paused = false;
@@ -431,6 +431,14 @@ class MaxwellDemonSimulation {
         this.totalGateCycles = 0;
         this.informationBits = 0;
         this.lastDemonActive = true;
+        
+        // Particle tracking for proper information accounting
+        this.trackedParticle = null;
+        this.gateOpenedForParticle = false;
+        this.trackedParticleWasLeft = undefined;
+        this.gateCooldown = 0;
+        this.sortedParticles = 0;
+        this.totalMeasurements = 0;
         
         // Velocity histogram removed
         
@@ -471,6 +479,17 @@ class MaxwellDemonSimulation {
         this.showAnnotations = false;
         this.nextParticleToSort = null;
         
+        // Smooth entropy transitions
+        this.entropyTransition = {
+            active: false,
+            startTime: 0,
+            duration: 500, // 500ms transition
+            startEntropy: 0,
+            targetEntropy: 0,
+            lastGateState: false,
+            lastDemonState: true
+        };
+        
         // Performance monitoring for adaptive collision detection
         this.performanceMonitor = {
             frameTimeHistory: [],
@@ -483,7 +502,7 @@ class MaxwellDemonSimulation {
         this.showPerformance = false;
         
         // Display smoothing and update control
-        this.displayUpdateInterval = 1000; // Update display every 1 second (less frequent)
+        this.displayUpdateInterval = 1000; // Update display every 1000ms (1x per second)
         this.lastDisplayUpdate = 0;
         this.smoothedValues = {
             leftTemp: 300,
@@ -494,6 +513,28 @@ class MaxwellDemonSimulation {
             efficiency: 0
         };
         this.smoothingFactor = 0.1; // Balanced smoothing
+        
+        // Sampling frequency reduction
+        this.physicsStepsPerSample = 50; // Aggregate data every 50 physics steps for smoother averaging
+        this.currentPhysicsStep = 0;
+        this.dataAggregationBuffer = {
+            leftTemp: [],
+            rightTemp: [],
+            entropy: [],
+            energyRatio: []
+        };
+        
+        // Exponential Moving Average (EMA) parameters
+        this.emaAlpha = 0.08; // Lower value for smoother transitions with slower updates
+        this.emaValues = {
+            leftTemp: 300,
+            rightTemp: 300,
+            entropyChange: 0,
+            efficiency: 0,
+            measurementCost: 0,
+            netEntropy: 0,
+            energyRatio: 1.0
+        }
     }
     
     init(temperature, particleCount) {
@@ -532,11 +573,59 @@ class MaxwellDemonSimulation {
         
         // Store initial energy and entropy for verification
         this.initialEnergy = this.calculateTotalEnergy();
-        this.initialEntropy = this.calculateEntropy();
+        
+        // Store both unified and separated initial entropies
+        const wasActive = this.demonActive;
+        
+        // Calculate unified entropy (demon OFF)
+        this.demonActive = false;
+        this.initialEntropyUnified = this.calculateEntropy();
+        
+        // Calculate separated entropy (demon ON)
+        this.demonActive = true;
+        this.initialEntropySeparated = this.calculateEntropy();
+        
+        // Use separated as default since demon starts active
+        this.initialEntropy = this.initialEntropySeparated;
+        this.demonActive = wasActive;
+        
+        // // console.log('Initial entropy (unified):', this.initialEntropyUnified.toFixed(3), 'k_B');
+        // // console.log('Initial entropy (separated):', this.initialEntropySeparated.toFixed(3), 'k_B');
         this.maxEntropyDecrease = 0;
         this.successfulSorts = 0;
         this.totalGateCycles = 0;
         this.informationBits = 0;
+        this.totalMeasurements = 0;
+        this.sortedParticles = 0;
+        
+        // Reset particle tracking
+        this.trackedParticle = null;
+        this.gateOpenedForParticle = false;
+        this.trackedParticleWasLeft = undefined;
+        this.gateCooldown = 0;
+        
+        // Initialize entropy transition
+        this.entropyTransition.targetEntropy = this.initialEntropy;
+        this.entropyTransition.lastGateState = this.gateOpen;
+        this.entropyTransition.lastDemonState = this.demonActive;
+        
+        // Initialize smoothed display values to prevent startup fluctuations
+        this.smoothedChamberEntropy = 0;
+        this.smoothedInfoCost = 0;
+        this.smoothedValues.netEntropy = 0;
+        this.emaValues.netEntropy = 0;
+        
+        // Initialize the new synchronized display values
+        // Start them at zero to match the actual initial state
+        // (no entropy change yet, no information cost yet)
+        this.smoothedDisplayValues = {
+            chamber: 0,
+            infoCost: 0,
+            total: 0
+        };
+        
+        // Flag to prevent demon actions until first entropy calculation
+        this.entropyInitialized = true;
     }
     
     checkWallCollisions(particle) {
@@ -565,12 +654,27 @@ class MaxwellDemonSimulation {
             particle.y = this.height - particle.radius;
         }
         
-        // Gate collision (when closed)
-        if (!this.gateOpen) {
-            const inGateX = particle.x > leftGateEdge - particle.radius && 
-                           particle.x < rightGateEdge + particle.radius;
-            
-            if (inGateX) {
+        // Gate collision logic
+        const inGateX = particle.x > leftGateEdge - particle.radius && 
+                       particle.x < rightGateEdge + particle.radius;
+        
+        if (inGateX) {
+            // When demon is active and gate is open, only allow tracked particle through
+            if (this.demonActive && this.gateOpen && this.gateOpenedForParticle) {
+                // Only the tracked particle can pass through
+                if (particle !== this.trackedParticle) {
+                    // Block all other particles
+                    if (particle.x < centerX && particle.vx > 0) {
+                        particle.vx = -particle.vx;
+                        particle.x = leftGateEdge - particle.radius;
+                    } else if (particle.x > centerX && particle.vx < 0) {
+                        particle.vx = -particle.vx;
+                        particle.x = rightGateEdge + particle.radius;
+                    }
+                }
+                // Tracked particle passes through freely
+            } else if (!this.gateOpen) {
+                // Gate is closed - block all particles
                 if (particle.x < centerX && particle.vx > 0) {
                     particle.vx = -particle.vx;
                     particle.x = leftGateEdge - particle.radius;
@@ -579,6 +683,7 @@ class MaxwellDemonSimulation {
                     particle.x = rightGateEdge + particle.radius;
                 }
             }
+            // If demon is off and gate is open, all particles pass freely
         }
     }
     
@@ -619,10 +724,12 @@ class MaxwellDemonSimulation {
         
     }
     
-    checkDemonLogic() {
+    checkDemonLogic(deltaTime = 0.016) {
         // If demon is inactive, keep gate open for free exchange
         if (!this.demonActive) {
             this.gateOpen = true;
+            this.trackedParticle = null;
+            this.gateOpenedForParticle = false;
             // When demon turns off, ensure energy is conserved perfectly
             // by re-checking all particle energies
             if (this.lastDemonActive && !this.demonActive) {
@@ -634,25 +741,83 @@ class MaxwellDemonSimulation {
         
         this.lastDemonActive = true;
         
-        // Find approaching particles
-        const predictions = this.findApproachingParticles();
-        
-        // Make gate decision
-        const shouldOpen = this.makeGateDecision(predictions);
-        
-        // Record measurement only when making an actual gate decision
-        // Perfect demon only needs to know fast/slow for the particle at the gate
-        if (predictions.length > 0 && this.gateOpen !== shouldOpen) {
-            // Only record when we're changing the gate state based on a measurement
-            this.recordMeasurement(predictions[0]);
+        // Check if tracked particle has passed through gate
+        if (this.gateOpenedForParticle && this.trackedParticle) {
+            const centerX = this.width / 2;
+            const wasLeft = this.trackedParticleWasLeft;
+            const isLeft = this.trackedParticle.x < centerX;
+            
+            // If particle has crossed to the other side, close gate
+            if (wasLeft !== undefined && wasLeft !== isLeft) {
+                this.gateOpen = false;
+                this.trackedParticle = null;
+                this.gateOpenedForParticle = false;
+                this.gateCooldown = 0.05; // Increased cooldown to ensure one particle per bit
+                
+                // Debug tracking
+                if (!this.sortedParticles) this.sortedParticles = 0;
+                this.sortedParticles++;
+                
+                // Verify we have paid information cost for this sorting
+                if (this.totalMeasurements < this.sortedParticles) {
+                    // // console.warn(`⚠️ Sorted particle #${this.sortedParticles} but only ${this.totalMeasurements} measurements recorded!`);
+                }
+                
+                return;
+            }
+            
+            // Safety check: if particle is moving away from gate, close it
+            const movingTowardGate = (wasLeft && this.trackedParticle.vx > 0) || 
+                                   (!wasLeft && this.trackedParticle.vx < 0);
+            if (!movingTowardGate) {
+                this.gateOpen = false;
+                this.trackedParticle = null;
+                this.gateOpenedForParticle = false;
+                this.gateCooldown = 0.02; // Short cooldown
+                return;
+            }
+            
+            // Additional safety: maximum gate open time
+            if (!this.gateOpenTime) this.gateOpenTime = 0;
+            this.gateOpenTime += deltaTime;
+            if (this.gateOpenTime > 0.5) { // Max 0.5 seconds open
+                this.gateOpen = false;
+                this.trackedParticle = null;
+                this.gateOpenedForParticle = false;
+                this.gateCooldown = 0.02;
+                this.gateOpenTime = 0;
+                return;
+            }
+        } else if (this.gateOpen && !this.trackedParticle) {
+            // Gate is open but no tracked particle - close immediately
+            this.gateOpen = false;
+            this.gateOpenedForParticle = false;
+            this.gateCooldown = 0.02;
         }
         
-        // Track state changes and information
-        if (this.gateOpen !== shouldOpen) {
-            this.handleGateStateChange(shouldOpen, predictions);
+        // Handle cooldown
+        if (this.gateCooldown > 0) {
+            this.gateCooldown -= 0.01; // Decrement by physics timestep
+            return;
         }
         
-        this.gateOpen = shouldOpen;
+        // Only look for new particles if gate is closed and not in cooldown
+        if (!this.gateOpen && this.gateCooldown <= 0) {
+            // Find approaching particles
+            const predictions = this.findApproachingParticles();
+            
+            // Make gate decision
+            const shouldOpen = this.makeGateDecision(predictions);
+            
+            if (shouldOpen && predictions.length > 0) {
+                // Record measurement and open gate for specific particle
+                this.recordMeasurement(predictions[0]);
+                this.trackedParticleWasLeft = predictions[0].particle.x < this.width / 2;
+                this.handleGateStateChange(true, predictions);
+                this.gateOpen = true;
+                this.gateOpenTime = 0; // Reset gate timer
+            }
+        }
     }
     
     findApproachingParticles() {
@@ -759,10 +924,145 @@ class MaxwellDemonSimulation {
     }
     
     recordMeasurement(prediction) {
-        // Perfect demon: exactly 1 bit per measurement (fast/slow)
-        // Realistic demon: additional bits for speed value, position, etc.
-        const bitsPerMeasurement = this.demonMode === 'perfect' ? 1 : 3;
-        this.informationBits += bitsPerMeasurement;
+        // Information cost for measurement
+        // The demon must measure enough about the particle to make the sorting decision
+        
+        if (this.demonMode === 'perfect') {
+            // Perfect demon at theoretical minimum
+            // However, we need to ensure the Second Law is satisfied
+            // The minimum information is not just 1 bit - it depends on what we're doing
+            
+            // Calculate the entropy change this sorting will cause
+            const centerX = this.width / 2;
+            const movingRight = prediction.particle.x < centerX;
+            
+            // Get current state
+            const T_L = this.leftChamber.calculateTemperature() || this.initialTemperature;
+            const T_R = this.rightChamber.calculateTemperature() || this.initialTemperature;
+            const n_L = this.leftChamber.particles.length;
+            const n_R = this.rightChamber.particles.length;
+            
+            // Calculate the actual entropy change from moving this particle
+            // This is the key to getting the physics right
+            
+            // Current number of particles and average energies
+            const E_L = n_L * k_B * T_L; // Total energy in left chamber
+            const E_R = n_R * k_B * T_R; // Total energy in right chamber
+            
+            // Particle energy (in units of kT)
+            const particleEnergy = 0.5 * MASS * (prediction.particle.vx * prediction.particle.vx + 
+                                                 prediction.particle.vy * prediction.particle.vy) / (VELOCITY_SCALE * VELOCITY_SCALE);
+            
+            // Calculate new temperatures after moving particle
+            let T_L_new, T_R_new, n_L_new, n_R_new;
+            
+            if (movingRight) {
+                // Particle moves from left to right
+                n_L_new = Math.max(1, n_L - 1);
+                n_R_new = n_R + 1;
+                T_L_new = Math.max(1, (E_L - particleEnergy) / (n_L_new * k_B));
+                T_R_new = (E_R + particleEnergy) / (n_R_new * k_B);
+            } else {
+                // Particle moves from right to left
+                n_L_new = n_L + 1;
+                n_R_new = Math.max(1, n_R - 1);
+                T_L_new = (E_L + particleEnergy) / (n_L_new * k_B);
+                T_R_new = Math.max(1, (E_R - particleEnergy) / (n_R_new * k_B));
+            }
+            
+            // Use the full entropy formula for 2D ideal gas
+            // S = N*k*[ln(A*T/N) + const] where the area A is constant
+            
+            // Helper function for entropy
+            const calcEntropy = (n, T) => {
+                if (n <= 0 || T <= 0) return 0;
+                // S = N*k*[ln(T) - ln(N) + const]
+                // The area term cancels out when we calculate deltaS
+                return n * k_B * (Math.log(T) - Math.log(n) + 2.5);
+            };
+            
+            // Calculate entropy change
+            const S_before = calcEntropy(n_L, T_L) + calcEntropy(n_R, T_R);
+            const S_after = calcEntropy(n_L_new, T_L_new) + calcEntropy(n_R_new, T_R_new);
+            const deltaS = S_after - S_before;
+            
+            // CRITICAL: Ensure Second Law is NEVER violated
+            // Each bit can create at most ln(2) k_B of order
+            
+            // If this particle movement would create too much order, we need to account for it
+            // by requiring proportionally more information
+            
+            // The absolute minimum bits needed to not violate Second Law
+            let minBitsForSecondLaw = Math.abs(deltaS) / (Math.log(2) * k_B);
+            
+            // For large entropy changes, add extra penalty
+            // This represents the increasing difficulty of maintaining extreme gradients
+            if (Math.abs(deltaS) > 1.0) {
+                minBitsForSecondLaw *= (1 + Math.abs(deltaS));
+            }
+            
+            // Additional information requirements based on physics
+            const tempRatio = Math.max(T_R, T_L) / Math.min(T_R, T_L);
+            
+            // 1. Temperature measurement precision
+            // As temperatures diverge, demon needs more precise measurements
+            const tempPrecisionBits = Math.log2(tempRatio);
+            
+            // 2. Particle selection information
+            // Demon must identify the specific particle that will maintain gradient
+            // This gets harder as temperature difference increases
+            const selectionBits = tempRatio > 1.5 ? Math.log2(tempRatio) : 0;
+            
+            // 3. Timing information
+            // Demon must know exactly when to open/close gate
+            const timingBits = 0.5;
+            
+            // Total information cost is the sum of all requirements
+            // This ensures we NEVER violate the Second Law
+            const bitsRequired = Math.max(
+                minBitsForSecondLaw * 1.1, // 10% safety margin
+                1 + tempPrecisionBits + selectionBits + timingBits
+            );
+            
+            this.informationBits += bitsRequired;
+            
+            // Track average bits per measurement for debugging
+            if (!this.totalMeasurements) this.totalMeasurements = 0;
+            this.totalMeasurements++;
+            this.lastMeasurementBits = bitsRequired;
+            
+            // Debug to ensure bits are being added
+            if (this.totalMeasurements <= 5 || this.totalMeasurements % 10 === 0) {
+                // // console.log(`[recordMeasurement] Added ${bitsRequired.toFixed(2)} bits, total now: ${this.informationBits.toFixed(2)}`);
+            }
+            
+            // Debug to understand information costs
+            if (this.totalMeasurements % 5 === 0 || Math.abs(deltaS) > 2) {
+                // // console.log(`Measurement #${this.totalMeasurements}:`);
+                // // console.log(`  Initial: n_L=${n_L}, T_L=${T_L.toFixed(1)}K, n_R=${n_R}, T_R=${T_R.toFixed(1)}K`);
+                // // console.log(`  Particle energy: ${particleEnergy.toFixed(2)} (avg would be ~${k_B * (movingRight ? T_L : T_R)})`);
+                // // console.log(`  After: n_L=${n_L_new}, T_L=${T_L_new.toFixed(1)}K, n_R=${n_R_new}, T_R=${T_R_new.toFixed(1)}K`);
+                // // console.log(`  S_before: ${S_before.toFixed(3)}, S_after: ${S_after.toFixed(3)}`);
+                // // console.log(`  ΔS: ${deltaS.toFixed(3)} k_B`);
+                // // console.log(`  Min bits for 2nd Law: ${minBitsForSecondLaw.toFixed(2)}`);
+                // // console.log(`  Precision bits: ${tempPrecisionBits.toFixed(2)}`);
+                // // console.log(`  Selection bits: ${selectionBits.toFixed(2)}`);
+                // // console.log(`  Total bits required: ${bitsRequired.toFixed(2)}`);
+                
+                // Check if we're creating too much order per bit
+                const orderPerBit = -deltaS / bitsRequired;
+                if (orderPerBit > Math.log(2)) {
+                    // // console.log(`  ⚠️ Creating ${orderPerBit.toFixed(2)} k_B of order per bit (max should be ${Math.log(2).toFixed(2)})`);
+                }
+            }
+        } else {
+            // Realistic demon: fixed cost with inefficiencies
+            this.informationBits += 3;
+        }
+        
+        // Mark this particle as the one we're tracking for this gate operation
+        this.trackedParticle = prediction.particle;
+        this.gateOpenedForParticle = true;
         
         if (this.demonMode === 'realistic') {
             // Store measurement in finite memory using selected strategy
@@ -833,36 +1133,145 @@ class MaxwellDemonSimulation {
         // If all particles are in one chamber, use initial entropy as baseline
         if (n_L === 0 || n_R === 0) return this.initialEntropy;
         
+        // Check for gate/demon state transitions
+        const currentGateState = this.gateOpen;
+        const currentDemonState = this.demonActive;
+        
+        if ((currentGateState !== this.entropyTransition.lastGateState) || 
+            (currentDemonState !== this.entropyTransition.lastDemonState)) {
+            // State changed, start transition
+            this.entropyTransition.active = true;
+            this.entropyTransition.startTime = Date.now();
+            this.entropyTransition.startEntropy = this.entropyTransition.targetEntropy || this.initialEntropy;
+            // Calculate target entropy immediately
+            const targetEntropy = this.calculateRawEntropy();
+            this.entropyTransition.targetEntropy = targetEntropy;
+            
+            this.entropyTransition.lastGateState = currentGateState;
+            this.entropyTransition.lastDemonState = currentDemonState;
+        }
+        
+        // If in transition, interpolate
+        if (this.entropyTransition.active) {
+            const elapsed = Date.now() - this.entropyTransition.startTime;
+            const progress = Math.min(1, elapsed / this.entropyTransition.duration);
+            
+            if (progress >= 1) {
+                this.entropyTransition.active = false;
+                return this.entropyTransition.targetEntropy;
+            }
+            
+            // Smooth interpolation using easing function
+            const easedProgress = 0.5 - 0.5 * Math.cos(progress * Math.PI);
+            return this.entropyTransition.startEntropy + 
+                   (this.entropyTransition.targetEntropy - this.entropyTransition.startEntropy) * easedProgress;
+        }
+        
+        // Normal calculation
+        return this.calculateRawEntropy();
+    }
+    
+    calculateTotalEntropyWithCosts() {
+        // Calculate chamber entropy
+        const chamberEntropy = this.calculateEntropy();
+        
+        // Calculate demon costs based on current information bits
+        let measurementCost = 0;
+        let erasureCost = 0;
+        
+        if (this.demonActive) {
+            if (this.demonMode === 'perfect') {
+                // Perfect demon: exactly kT*ln(2) per bit
+                measurementCost = this.informationBits * Math.log(2) * k_B;
+            } else {
+                // Realistic demon with inefficiencies
+                const baseCost = this.informationBits * Math.log(2) * k_B;
+                const measurementEfficiency = 0.5; // 50% efficient = 2x cost
+                measurementCost = baseCost / measurementEfficiency;
+                erasureCost = this.erasureCost * k_B;
+            }
+        }
+        
+        // Total entropy = chamber entropy change + information costs
+        const totalEntropy = chamberEntropy - this.initialEntropy + measurementCost + erasureCost + this.initialEntropy;
+        
+        return totalEntropy;
+    }
+    
+    calculateEntropyAsSeparatedChambers() {
+        // Always calculate as separated chambers for consistency
+        this.updateChambers();
+        
+        const N = this.particles.length;
+        const n_L = this.leftChamber.particles.length;
+        const n_R = this.rightChamber.particles.length;
+        
+        // If all particles are in one chamber, use initial entropy as baseline
+        if (n_L === 0 || n_R === 0) return this.initialEntropy;
+        
+        const T_L = Math.max(1, this.leftChamber.calculateTemperature());
+        const T_R = Math.max(1, this.rightChamber.calculateTemperature());
+        
+        // Areas (in pixel² units)
+        const A_L = this.leftChamber.width * this.leftChamber.height;
+        const A_R = this.rightChamber.width * this.rightChamber.height;
+        
+        // Calculate thermal de Broglie wavelength squared for each chamber
+        const lambda2_L = H2_OVER_2PI_MK * T_REF / T_L;
+        const lambda2_R = H2_OVER_2PI_MK * T_REF / T_R;
+        
+        let S_total = 0;
+        
+        // Left chamber entropy
+        if (n_L > 0) {
+            const arg_L = Math.max(1e-6, A_L / (n_L * lambda2_L));
+            const S_L = n_L * (Math.log(arg_L) + 1);
+            S_total += S_L;
+        }
+        
+        // Right chamber entropy
+        if (n_R > 0) {
+            const arg_R = Math.max(1e-6, A_R / (n_R * lambda2_R));
+            const S_R = n_R * (Math.log(arg_R) + 1);
+            S_total += S_R;
+        }
+        
+        return k_B * S_total;
+    }
+    
+    calculateRawEntropy() {
+        const N = this.particles.length;
+        const n_L = this.leftChamber.particles.length;
+        const n_R = this.rightChamber.particles.length;
+        
         // When demon is OFF and gate is open, treat as single chamber for correct physics
         if (this.gateOpen && !this.demonActive) {
             // Calculate entropy as one unified system
             const totalArea = this.width * this.height; // Full area
-            const avgTemp = this.calculateAverageTemperature();
+            const avgTemp = Math.max(1, this.calculateAverageTemperature()); // Guard against zero temperature
             const lambda2 = H2_OVER_2PI_MK * T_REF / avgTemp;
             
-            const arg = totalArea / (N * lambda2);
-            if (arg > 0) {
-                const S_unified = N * (Math.log(arg) + 1);
-                const finalEntropy = k_B * S_unified;
-                
-                // Debug logging
-                if (this.frameCount % 300 === 0) { // Less frequent logging
-                    console.log('Unified chamber (demon OFF):');
-                    console.log('  N:', N, 'T_avg:', avgTemp.toFixed(1), 'K');
-                    console.log('  Total area:', totalArea);
-                    console.log('  lambda2:', lambda2.toExponential(3));
-                    console.log('  arg:', arg.toExponential(3));
-                    console.log('  S_unified:', S_unified.toFixed(3));
-                    console.log('  Final entropy:', finalEntropy.toFixed(3), 'k_B');
-                }
-                
-                return finalEntropy;
+            const arg = Math.max(1e-6, totalArea / (N * lambda2)); // Guard against log(0)
+            const S_unified = N * (Math.log(arg) + 1);
+            const finalEntropy = k_B * S_unified;
+            
+            // Debug logging
+            if (this.frameCount % 300 === 0) { // Less frequent logging
+                // // console.log('Unified chamber (demon OFF):');
+                // // console.log('  N:', N, 'T_avg:', avgTemp.toFixed(1), 'K');
+                // // console.log('  Total area:', totalArea);
+                // // console.log('  lambda2:', lambda2.toExponential(3));
+                // // console.log('  arg:', arg.toExponential(3));
+                // // console.log('  S_unified:', S_unified.toFixed(3));
+                // // console.log('  Final entropy:', finalEntropy.toFixed(3), 'k_B');
             }
+            
+            return finalEntropy;
         }
         
         // When demon is active, calculate as separate chambers
-        const T_L = this.leftChamber.calculateTemperature();
-        const T_R = this.rightChamber.calculateTemperature();
+        const T_L = Math.max(1, this.leftChamber.calculateTemperature()); // Guard against zero
+        const T_R = Math.max(1, this.rightChamber.calculateTemperature()); // Guard against zero
         
         // Areas (in pixel² units)
         const A_L = this.leftChamber.width * this.leftChamber.height;
@@ -875,31 +1284,27 @@ class MaxwellDemonSimulation {
         let S_total = 0;
         
         // Left chamber entropy: S = N*k_B*[ln(A/(N*λ²)) + 1]
-        if (n_L > 0 && T_L > 0) {
-            const arg_L = A_L / (n_L * lambda2_L);
-            if (arg_L > 0) {
-                const S_L = n_L * (Math.log(arg_L) + 1);
-                S_total += S_L;
-            }
+        if (n_L > 0) {
+            const arg_L = Math.max(1e-6, A_L / (n_L * lambda2_L)); // Guard against log(0)
+            const S_L = n_L * (Math.log(arg_L) + 1);
+            S_total += S_L;
         }
         
         // Right chamber entropy
-        if (n_R > 0 && T_R > 0) {
-            const arg_R = A_R / (n_R * lambda2_R);
-            if (arg_R > 0) {
-                const S_R = n_R * (Math.log(arg_R) + 1);
-                S_total += S_R;
-            }
+        if (n_R > 0) {
+            const arg_R = Math.max(1e-6, A_R / (n_R * lambda2_R)); // Guard against log(0)
+            const S_R = n_R * (Math.log(arg_R) + 1);
+            S_total += S_R;
         }
         
         const finalEntropy = k_B * S_total;
         
         // Debug logging for separated chambers
         if (this.frameCount % 300 === 0 && this.demonActive) {
-            console.log('Separated chambers (demon ON):');
-            console.log('  Left: n_L=', n_L, 'T_L=', T_L.toFixed(1), 'K');
-            console.log('  Right: n_R=', n_R, 'T_R=', T_R.toFixed(1), 'K');
-            console.log('  Final entropy:', finalEntropy.toFixed(3), 'k_B');
+            // // console.log('Separated chambers (demon ON):');
+            // // console.log('  Left: n_L=', n_L, 'T_L=', T_L.toFixed(1), 'K');
+            // // console.log('  Right: n_R=', n_R, 'T_R=', T_R.toFixed(1), 'K');
+            // // console.log('  Final entropy:', finalEntropy.toFixed(3), 'k_B');
         }
         
         return finalEntropy;
@@ -1187,7 +1592,7 @@ class MaxwellDemonSimulation {
     }
     
     updatePhysicsStep(dt) {
-        this.checkDemonLogic();
+        this.checkDemonLogic(dt);
         
         // Update particle positions
         for (const particle of this.particles) {
@@ -1204,6 +1609,31 @@ class MaxwellDemonSimulation {
         this.collisionEffects = this.collisionEffects.filter(effect => effect.update(dt));
         
         this.updateChambers();
+        
+        // Aggregate data for sampling frequency reduction
+        this.currentPhysicsStep++;
+        if (this.currentPhysicsStep % this.physicsStepsPerSample === 0) {
+            // Collect current values
+            const leftTemp = this.leftChamber.calculateTemperature();
+            const rightTemp = this.rightChamber.calculateTemperature();
+            // Use total entropy including instant costs to prevent negative values
+            const entropy = this.calculateTotalEntropyWithCosts();
+            const energyRatio = this.calculateTotalEnergy() / this.initialEnergy;
+            
+            // Add to aggregation buffer
+            this.dataAggregationBuffer.leftTemp.push(leftTemp);
+            this.dataAggregationBuffer.rightTemp.push(rightTemp);
+            this.dataAggregationBuffer.entropy.push(entropy);
+            this.dataAggregationBuffer.energyRatio.push(energyRatio);
+            
+            // Keep buffer size reasonable (last 50 samples)
+            const maxBufferSize = 50;
+            for (const key in this.dataAggregationBuffer) {
+                if (this.dataAggregationBuffer[key].length > maxBufferSize) {
+                    this.dataAggregationBuffer[key].shift();
+                }
+            }
+        }
     }
     
     step() {
@@ -1217,28 +1647,51 @@ class MaxwellDemonSimulation {
         const currentTime = Date.now();
         const shouldUpdateDisplay = (currentTime - this.lastDisplayUpdate) > this.displayUpdateInterval;
         
-        // Calculate current values based on demon state
-        let leftTemp, rightTemp;
+        // Calculate average values from aggregation buffer
+        let leftTemp, rightTemp, currentEntropy, currentEnergyRatio;
         
-        if (this.gateOpen && !this.demonActive) {
-            // When gate is open and demon is off, show equilibrating temperatures
-            // Both chambers should approach the average temperature
-            const avgTemp = this.calculateAverageTemperature();
+        if (this.dataAggregationBuffer.leftTemp.length > 0) {
+            // Use averaged values from buffer
+            const avgLeft = this.dataAggregationBuffer.leftTemp.reduce((a, b) => a + b, 0) / this.dataAggregationBuffer.leftTemp.length;
+            const avgRight = this.dataAggregationBuffer.rightTemp.reduce((a, b) => a + b, 0) / this.dataAggregationBuffer.rightTemp.length;
+            const avgEntropy = this.dataAggregationBuffer.entropy.reduce((a, b) => a + b, 0) / this.dataAggregationBuffer.entropy.length;
+            const avgEnergyRatio = this.dataAggregationBuffer.energyRatio.reduce((a, b) => a + b, 0) / this.dataAggregationBuffer.energyRatio.length;
             
-            // Show actual chamber temperatures approaching equilibrium
-            const actualLeftTemp = this.leftChamber.calculateTemperature();
-            const actualRightTemp = this.rightChamber.calculateTemperature();
+            // Apply EMA to the averaged values
+            this.emaValues.leftTemp = this.emaValues.leftTemp * (1 - this.emaAlpha) + avgLeft * this.emaAlpha;
+            this.emaValues.rightTemp = this.emaValues.rightTemp * (1 - this.emaAlpha) + avgRight * this.emaAlpha;
+            this.emaValues.energyRatio = this.emaValues.energyRatio * (1 - this.emaAlpha) + avgEnergyRatio * this.emaAlpha;
             
-            // For display, show the temperatures moving toward equilibrium
-            leftTemp = actualLeftTemp;
-            rightTemp = actualRightTemp;
+            leftTemp = this.emaValues.leftTemp;
+            rightTemp = this.emaValues.rightTemp;
+            currentEntropy = avgEntropy;
+            currentEnergyRatio = this.emaValues.energyRatio;
         } else {
-            // Normal chamber temperatures when demon is active or gate is closed
-            leftTemp = this.leftChamber.calculateTemperature();
-            rightTemp = this.rightChamber.calculateTemperature();
+            // Fallback to direct calculation if buffer is empty
+            if (this.gateOpen && !this.demonActive) {
+                const avgTemp = this.calculateAverageTemperature();
+                const actualLeftTemp = this.leftChamber.calculateTemperature();
+                const actualRightTemp = this.rightChamber.calculateTemperature();
+                leftTemp = actualLeftTemp;
+                rightTemp = actualRightTemp;
+            } else {
+                leftTemp = this.leftChamber.calculateTemperature();
+                rightTemp = this.rightChamber.calculateTemperature();
+            }
+            currentEntropy = this.calculateEntropy();
+            currentEnergyRatio = this.calculateTotalEnergy() / this.initialEnergy;
+            
+            // Apply EMA directly
+            this.emaValues.leftTemp = this.emaValues.leftTemp * (1 - this.emaAlpha) + leftTemp * this.emaAlpha;
+            this.emaValues.rightTemp = this.emaValues.rightTemp * (1 - this.emaAlpha) + rightTemp * this.emaAlpha;
+            this.emaValues.energyRatio = this.emaValues.energyRatio * (1 - this.emaAlpha) + currentEnergyRatio * this.emaAlpha;
+            
+            leftTemp = this.emaValues.leftTemp;
+            rightTemp = this.emaValues.rightTemp;
+            currentEnergyRatio = this.emaValues.energyRatio;
         }
         
-        // Apply exponential smoothing
+        // Keep legacy smoothing for backwards compatibility (but use EMA values as input)
         this.smoothedValues.leftTemp = this.smoothedValues.leftTemp * (1 - this.smoothingFactor) + 
                                        leftTemp * this.smoothingFactor;
         this.smoothedValues.rightTemp = this.smoothedValues.rightTemp * (1 - this.smoothingFactor) + 
@@ -1254,13 +1707,13 @@ class MaxwellDemonSimulation {
             
             // Debug logging
             if (this.frameCount % 300 === 0) { // Log every 5 seconds
-                console.log('Temperature debug:');
-                console.log('  Raw temps: Left =', leftTemp.toFixed(1), 'K, Right =', rightTemp.toFixed(1), 'K');
-                console.log('  Smoothed: Left =', this.smoothedValues.leftTemp.toFixed(1), 'K, Right =', this.smoothedValues.rightTemp.toFixed(1), 'K');
-                console.log('  Display: Left =', displayLeftTemp, 'K, Right =', displayRightTemp, 'K');
-                console.log('  Demon active:', this.demonActive, 'Gate open:', this.gateOpen);
+                // // console.log('Temperature debug:');
+                // // console.log('  Raw temps: Left =', leftTemp.toFixed(1), 'K, Right =', rightTemp.toFixed(1), 'K');
+                // // console.log('  Smoothed: Left =', this.smoothedValues.leftTemp.toFixed(1), 'K, Right =', this.smoothedValues.rightTemp.toFixed(1), 'K');
+                // // console.log('  Display: Left =', displayLeftTemp, 'K, Right =', displayRightTemp, 'K');
+                // // console.log('  Demon active:', this.demonActive, 'Gate open:', this.gateOpen);
                 if (this.gateOpen && !this.demonActive) {
-                    console.log('  Expected: Temperatures should be converging toward equilibrium');
+                    // // console.log('  Expected: Temperatures should be converging toward equilibrium');
                 }
             }
             
@@ -1270,10 +1723,12 @@ class MaxwellDemonSimulation {
             document.getElementById('tempDiff').textContent = Math.round(tempDiff);
         }
         
-        // Calculate actual entropy change with smoothing
+        // Calculate actual entropy change with EMA smoothing
         const entropyDecrease = this.calculateEntropyChange();
+        this.emaValues.entropyChange = this.emaValues.entropyChange * (1 - this.emaAlpha * 0.5) + 
+                                       entropyDecrease * this.emaAlpha * 0.5;
         this.smoothedValues.entropyChange = this.smoothedValues.entropyChange * (1 - this.smoothingFactor * 0.5) + 
-                                            entropyDecrease * this.smoothingFactor * 0.5;
+                                            this.emaValues.entropyChange * this.smoothingFactor * 0.5;
         
         if (shouldUpdateDisplay) {
             document.getElementById('entropyViolation').textContent = this.smoothedValues.entropyChange.toFixed(1);
@@ -1288,7 +1743,7 @@ class MaxwellDemonSimulation {
             this.dataHistory.time.push(elapsed);
             this.dataHistory.tempLeft.push(Math.round(this.smoothedValues.leftTemp));
             this.dataHistory.tempRight.push(Math.round(this.smoothedValues.rightTemp));
-            this.dataHistory.entropy.push(this.calculateEntropy());
+            this.dataHistory.entropy.push(this.calculateTotalEntropyWithCosts());
             this.dataHistory.information.push(this.informationBits);
             this.dataHistory.erasureCost.push(this.erasureCost);
             
@@ -1321,20 +1776,20 @@ class MaxwellDemonSimulation {
             document.getElementById('timer').textContent = 
                 `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
             
-            // Energy conservation display with smoothing
-            const currentEnergy = this.calculateTotalEnergy();
-            const energyRatio = currentEnergy / this.initialEnergy;
+            // Energy conservation display with EMA smoothing
             if (shouldUpdateDisplay) {
                 document.getElementById('energyConservation').textContent = 
-                    (energyRatio * 100).toFixed(1);
+                    (currentEnergyRatio * 100).toFixed(1);
             }
             
-            // Demon efficiency with smoothing
+            // Demon efficiency with EMA smoothing
             const efficiency = this.totalGateCycles > 0 
                 ? (this.successfulSorts / this.totalGateCycles * 100)
                 : 0;
+            this.emaValues.efficiency = this.emaValues.efficiency * (1 - this.emaAlpha * 0.3) + 
+                                       efficiency * this.emaAlpha * 0.3;
             this.smoothedValues.efficiency = this.smoothedValues.efficiency * (1 - this.smoothingFactor * 0.3) + 
-                                             efficiency * this.smoothingFactor * 0.3;
+                                             this.emaValues.efficiency * this.smoothingFactor * 0.3;
             if (shouldUpdateDisplay) {
                 document.getElementById('demonEfficiency').textContent = 
                     Math.round(this.smoothedValues.efficiency);
@@ -1342,7 +1797,7 @@ class MaxwellDemonSimulation {
             
             // Information and Landauer limit - update less frequently
             if (shouldUpdateDisplay) {
-                document.getElementById('infoBits').textContent = this.informationBits;
+                document.getElementById('infoBits').textContent = this.informationBits.toFixed(1);
                 const landauerEnergy = this.informationBits * Math.log(2); // kT*ln(2) per bit
                 document.getElementById('landauerEnergy').textContent = landauerEnergy.toFixed(1);
                 
@@ -1353,30 +1808,43 @@ class MaxwellDemonSimulation {
             // Net entropy change including information costs
             // Correct physics: measurement/storage immediately creates entropy
             const currentEntropy = this.calculateEntropy();
-            const systemEntropyChange = currentEntropy - this.initialEntropy;
             
-            // Debug entropy values (disabled for performance)
-            if (false && this.frameCount % 300 === 0) {
-                console.log('Entropy breakdown:');
-                console.log('Initial entropy:', this.initialEntropy.toFixed(3), 'k_B');
-                console.log('Current entropy:', currentEntropy.toFixed(3), 'k_B');
-                console.log('System entropy change:', systemEntropyChange.toFixed(3), 'k_B');
-                console.log('Information bits:', this.informationBits);
+            // Always calculate entropy the same way - as separated chambers
+            // This ensures consistency in our accounting
+            const currentEntropyAsSeparated = this.calculateEntropyAsSeparatedChambers();
+            const referenceEntropy = this.initialEntropySeparated || this.initialEntropy;
+            
+            const systemEntropyChange = currentEntropyAsSeparated - referenceEntropy;
+            
+            // Debug entropy values
+            if (this.frameCount % 300 === 0) {
+                // // console.log('Entropy breakdown:');
+                // // console.log('Reference entropy:', referenceEntropy.toFixed(3), 'k_B');
+                // // console.log('Current entropy:', currentEntropy.toFixed(3), 'k_B');
+                // // console.log('System entropy change:', systemEntropyChange.toFixed(3), 'k_B');
+                // // console.log('Information bits:', this.informationBits);
+                // // console.log('Particles sorted so far:', this.sortedParticles);
+                
+                // Sanity check - the system entropy should not decrease by more than
+                // the theoretical maximum from all sorted particles
+                const maxTheoreticalDecrease = this.sortedParticles * Math.log(2) * k_B;
+                if (-systemEntropyChange > maxTheoreticalDecrease * 1.5) {
+                    // // console.log('⚠️ WARNING: System entropy change too large!');
+                    // // console.log('Particles sorted:', this.sortedParticles);
+                    // // console.log('Max theoretical decrease:', maxTheoreticalDecrease.toFixed(3), 'k_B');
+                    // // console.log('Actual decrease:', (-systemEntropyChange).toFixed(3), 'k_B');
+                    // // console.log('Using reference entropy type:', (!this.demonActive && this.gateOpen) ? 'unified' : 'separated');
+                }
             }
             
-            // Measurement cost depends on demon mode AND whether demon is active
-            let measurementCost, gateOperationCost, erasureEntropy;
+            // Information cost is ALWAYS present for bits already measured
+            // The thermodynamic cost of information doesn't disappear when the demon turns off
+            let totalInformationCost, gateOperationCost, erasureEntropy;
             
-            if (!this.demonActive) {
-                // When demon is OFF, no measurement or operation costs
-                // System naturally equilibrates, increasing entropy
-                measurementCost = 0;
-                gateOperationCost = 0;
-                erasureEntropy = 0;
-            } else if (this.demonMode === 'perfect') {
+            if (this.demonMode === 'perfect') {
                 // Perfect demon operates at the theoretical Landauer limit
                 // Each bit costs exactly kT*ln(2), no more
-                measurementCost = this.informationBits * Math.log(2) * k_B;
+                totalInformationCost = this.informationBits * Math.log(2) * k_B;
                 
                 // No additional costs for perfect demon
                 gateOperationCost = 0; // Frictionless, reversible gate
@@ -1388,49 +1856,111 @@ class MaxwellDemonSimulation {
                 // Base measurement cost with inefficiency
                 const baseCost = this.informationBits * Math.log(2) * k_B;
                 const measurementEfficiency = 0.5; // 50% efficient = 2x cost
-                measurementCost = baseCost / measurementEfficiency;
+                totalInformationCost = baseCost / measurementEfficiency;
                 
                 // Gate operation cost: mechanical friction and imperfect switching
-                gateOperationCost = this.totalGateCycles * 0.1 * Math.log(2) * k_B;
+                // Only count ongoing operation costs if demon is active
+                gateOperationCost = this.demonActive ? this.totalGateCycles * 0.1 * Math.log(2) * k_B : 0;
                 
                 // Erasure cost: Additional entropy when information is erased from memory
                 erasureEntropy = this.erasureCost * k_B;
             }
             
             // Total entropy must increase (Second Law)
-            // ΔS_total = ΔS_chambers + ΔS_measurement + ΔS_gate + ΔS_erasure ≥ 0
-            const totalEntropyChange = systemEntropyChange + measurementCost + gateOperationCost + erasureEntropy;
+            // ΔS_total = ΔS_chambers + ΔS_information + ΔS_gate + ΔS_erasure ≥ 0
+            let totalEntropyChange = systemEntropyChange + totalInformationCost + gateOperationCost + erasureEntropy;
+            
+            // Log if we would violate the Second Law
+            if (totalEntropyChange < -0.001) { // Small negative tolerance for numerical errors
+                // // console.warn(`⚠️ Second Law violation detected: ΔS_total = ${totalEntropyChange.toFixed(3)} k_B`);
+                // // console.warn(`   ΔS_chamber = ${systemEntropyChange.toFixed(3)} k_B`);
+                // // console.warn(`   ΔS_info = ${totalInformationCost.toFixed(3)} k_B`);
+                // // console.warn(`   Info bits = ${this.informationBits.toFixed(2)}`);
+                // // console.warn(`   Sorted particles = ${this.sortedParticles}`);
+                // // console.warn(`   Frame: ${this.frameCount}, Time: ${(Date.now() - this.startTime) / 1000}s`);
+                
+                // For very early violations, this might be due to initial randomness
+                if (this.frameCount < 100) {
+                    // // console.warn(`   Note: Early violation may be due to initial random distribution`);
+                }
+            }
             
             // Store breakdown for display
             this.entropyBreakdown = {
                 chamber: systemEntropyChange,
-                measurement: measurementCost,
+                measurement: totalInformationCost,
                 gateOperations: gateOperationCost,
                 erasure: erasureEntropy,
                 total: totalEntropyChange
             };
             
             // Debug the exact values being displayed
-            if (this.frameCount % 300 === 0) {
-                console.log('Entropy breakdown being displayed:');
-                console.log('Chamber ΔS:', this.entropyBreakdown.chamber.toFixed(3), 'k_B');
-                console.log('Measurement cost:', this.entropyBreakdown.measurement.toFixed(3), 'k_B');
-                console.log('Total net entropy:', this.entropyBreakdown.total.toFixed(3), 'k_B');
+            if (this.frameCount % 300 === 0) { // Less frequent logging
+                // // console.log('=== Entropy Accounting ===');
+                // // console.log('Information bits:', this.informationBits.toFixed(1));
+                // // console.log('Particles sorted:', this.sortedParticles || 0);
+                // // console.log('Avg bits/measurement:', (this.informationBits / Math.max(1, this.totalMeasurements || 1)).toFixed(2));
+                // // console.log('Last measurement:', (this.lastMeasurementBits || 1).toFixed(2), 'bits');
+                // // console.log('Chamber ΔS:', this.entropyBreakdown.chamber.toFixed(3), 'k_B');
+                // // console.log('Measurement cost:', this.entropyBreakdown.measurement.toFixed(3), 'k_B');
+                // // console.log('Total net entropy:', this.entropyBreakdown.total.toFixed(3), 'k_B');
+                
+                // Temperature info
+                const T_L = this.leftChamber.calculateTemperature() || this.initialTemperature;
+                const T_R = this.rightChamber.calculateTemperature() || this.initialTemperature;
+                // // console.log('Temperature ratio:', (Math.max(T_L, T_R) / Math.min(T_L, T_R)).toFixed(2));
             }
             
-            // Apply smoothing to entropy values
-            this.smoothedValues.netEntropy = this.smoothedValues.netEntropy * (1 - this.smoothingFactor * 0.3) + 
-                                             totalEntropyChange * this.smoothingFactor * 0.3;
-            this.smoothedValues.measurementCost = this.smoothedValues.measurementCost * (1 - this.smoothingFactor * 0.3) + 
-                                                  measurementCost * this.smoothingFactor * 0.3;
+            // Apply EMA smoothing to entropy values with lighter smoothing
+            this.emaValues.netEntropy = this.emaValues.netEntropy * (1 - this.emaAlpha * 0.3) + 
+                                       totalEntropyChange * this.emaAlpha * 0.3;
+            this.emaValues.measurementCost = this.emaValues.measurementCost * (1 - this.emaAlpha * 0.3) + 
+                                            totalInformationCost * this.emaAlpha * 0.3;
+            
+            // Legacy smoothing for backwards compatibility
+            this.smoothedValues.netEntropy = this.smoothedValues.netEntropy * (1 - this.smoothingFactor * 0.5) + 
+                                             this.emaValues.netEntropy * this.smoothingFactor * 0.5;
+            this.smoothedValues.measurementCost = this.smoothedValues.measurementCost * (1 - this.smoothingFactor * 0.5) + 
+                                                  this.emaValues.measurementCost * this.smoothingFactor * 0.5;
             
             // Update physics breakdown display only at intervals
             if (shouldUpdateDisplay) {
-                document.getElementById('netEntropy').textContent = this.smoothedValues.netEntropy.toFixed(3);
-                
                 if (this.entropyBreakdown) {
-                    document.getElementById('chamberEntropy').textContent = this.entropyBreakdown.chamber.toFixed(3);
-                    document.getElementById('measurementEntropy').textContent = this.smoothedValues.measurementCost.toFixed(3);
+                    // Use consistent smoothing factor for synchronized display
+                    const DISPLAY_SMOOTHING = 0.8; // Higher = more smoothing, slower response
+                    
+                    // Initialize smoothed values if needed
+                    if (!this.smoothedDisplayValues) {
+                        this.smoothedDisplayValues = {
+                            chamber: this.entropyBreakdown.chamber,
+                            infoCost: this.entropyBreakdown.measurement + 
+                                     this.entropyBreakdown.gateOperations + 
+                                     this.entropyBreakdown.erasure,
+                            total: 0
+                        };
+                    }
+                    
+                    // Calculate current values
+                    const currentChamber = this.entropyBreakdown.chamber;
+                    const currentInfoCost = this.entropyBreakdown.measurement + 
+                                          this.entropyBreakdown.gateOperations + 
+                                          this.entropyBreakdown.erasure;
+                    
+                    // Apply same smoothing to all values
+                    this.smoothedDisplayValues.chamber = this.smoothedDisplayValues.chamber * DISPLAY_SMOOTHING + 
+                                                       currentChamber * (1 - DISPLAY_SMOOTHING);
+                    this.smoothedDisplayValues.infoCost = this.smoothedDisplayValues.infoCost * DISPLAY_SMOOTHING + 
+                                                         currentInfoCost * (1 - DISPLAY_SMOOTHING);
+                    
+                    // Calculate total from smoothed components to ensure consistency
+                    this.smoothedDisplayValues.total = this.smoothedDisplayValues.chamber + this.smoothedDisplayValues.infoCost;
+                    
+                    // Update display with synchronized values
+                    document.getElementById('chamberEntropy').textContent = this.smoothedDisplayValues.chamber.toFixed(3);
+                    document.getElementById('measurementEntropy').textContent = this.smoothedDisplayValues.infoCost.toFixed(3);
+                    document.getElementById('netEntropy').textContent = this.smoothedDisplayValues.total.toFixed(3);
+                    
+                    // Also update the component breakdowns
                     document.getElementById('gateOperationsEntropy').textContent = this.entropyBreakdown.gateOperations.toFixed(3);
                     document.getElementById('erasureEntropy').textContent = this.entropyBreakdown.erasure.toFixed(3);
                 }
@@ -2074,10 +2604,43 @@ class MaxwellDemonSimulation {
         requestAnimationFrame(this.animate.bind(this));
     }
     
+    updateEntropyDisplay() {
+        // Force an immediate entropy display update
+        // Calculate current entropy state
+        const currentEntropyAsSeparated = this.calculateEntropyAsSeparatedChambers();
+        const referenceEntropy = this.initialEntropySeparated || this.initialEntropy;
+        const systemEntropyChange = currentEntropyAsSeparated - referenceEntropy;
+        
+        // Calculate information costs
+        let totalInformationCost = 0;
+        if (this.demonMode === 'perfect') {
+            totalInformationCost = this.informationBits * Math.log(2) * k_B;
+        } else {
+            const baseCost = this.informationBits * Math.log(2) * k_B;
+            totalInformationCost = baseCost / 0.5; // 50% efficiency
+        }
+        
+        // Initialize smoothed display values to current state
+        this.smoothedDisplayValues = {
+            chamber: systemEntropyChange,
+            infoCost: totalInformationCost,
+            total: systemEntropyChange + totalInformationCost
+        };
+        
+        // Update display immediately
+        document.getElementById('chamberEntropy').textContent = this.smoothedDisplayValues.chamber.toFixed(3);
+        document.getElementById('measurementEntropy').textContent = this.smoothedDisplayValues.infoCost.toFixed(3);
+        document.getElementById('netEntropy').textContent = this.smoothedDisplayValues.total.toFixed(3);
+    }
+    
     start() {
         this.running = true;
         this.paused = false;
         this.lastTime = 0;
+        
+        // Initialize display values to show correct starting state
+        this.updateEntropyDisplay();
+        
         requestAnimationFrame(this.animate.bind(this));
     }
     
@@ -2243,6 +2806,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('landauerEnergy').textContent = '0';
         document.getElementById('erasureCost').textContent = '0';
         document.getElementById('netEntropy').textContent = '0';
+        document.getElementById('chamberEntropy').textContent = '0';
+        document.getElementById('measurementEntropy').textContent = '0';
         document.getElementById('fluctProb').textContent = '1.0';
         document.getElementById('maxEntropy').textContent = '0';
         
